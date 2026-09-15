@@ -2,23 +2,55 @@ import os
 import time
 import requests
 import logging
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TELEGRAM_BOT_TOKEN = "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 TELEGRAM_CHAT_ID = "7113872351"
-
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # Multi-Chain Supported Networks
 SUPPORTED_CHAINS = ["solana", "base", "bsc", "ethereum"]
 
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
-RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/" # Primary for Solana; EVM uses DexScreener liquidity metrics
+RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
 tracked_tokens = {}
+
+def send_telegram_message(text, inline_keyboard=None):
+    """Sends a standard text message via Telegram HTTP API"""
+    try:
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "Markdown"
+        }
+        if inline_keyboard:
+            payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+            
+        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=5)
+    except Exception as e:
+        logging.error(f"Telegram dispatch error: {e}")
+
+def send_telegram_photo(photo_url, caption, inline_keyboard=None):
+    """Sends a photo with a caption; falls back to text if image fails"""
+    try:
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "photo": photo_url,
+            "caption": caption,
+            "parse_mode": "Markdown"
+        }
+        if inline_keyboard:
+            payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+            
+        res = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5)
+        if res.status_code != 200:
+            send_telegram_message(caption, inline_keyboard)
+    except Exception as e:
+        logging.error(f"Telegram photo error: {e}")
+        send_telegram_message(caption, inline_keyboard)
 
 def multi_chain_safety_filter(chain_id, mint_address, market_cap):
     """
@@ -26,7 +58,6 @@ def multi_chain_safety_filter(chain_id, mint_address, market_cap):
     and high token concentration across Solana and EVM chains.
     """
     try:
-        # For Solana, use RugCheck telemetry
         if chain_id == "solana":
             res = requests.get(f"{RUGCHECK_API}{mint_address}/report", timeout=5)
             if res.status_code == 200:
@@ -38,13 +69,12 @@ def multi_chain_safety_filter(chain_id, mint_address, market_cap):
                 if risk_score <= 800 and not is_mintable and not is_freezable:
                     return True
         else:
-            # For EVM chains (Base, BSC, Ethereum), validate via DexScreener liquidity data
             pair_res = requests.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5)
             if pair_res.status_code == 200:
                 pairs = pair_res.json().get("pairs", [])
                 if pairs:
                     lp_usd = pairs[0].get("liquidity", {}).get("usd", 0)
-                    if lp_usd >= 5000: # Minimum $5k locked liquidity check for EVM
+                    if lp_usd >= 5000:
                         return True
     except Exception as e:
         logging.error(f"Multi-chain safety check error ({chain_id}): {e}")
@@ -66,24 +96,16 @@ def send_multichain_telegram_alert(token_data):
     )
     
     keyboard = [
-        [InlineKeyboardButton("📈 DexScreener Chart", url=token_data['url'])],
-        [InlineKeyboardButton("⚡ View Pool", url=token_data['url'])]
+        [{"text": "📈 DexScreener Chart", "url": token_data['url']}],
+        [{"text": "⚡ View Pool", "url": token_data['url']}]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    try:
-        if token_data['image'] and token_data['image'].startswith("http"):
-            bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=token_data['image'], caption=caption, parse_mode="Markdown", reply_markup=reply_markup)
-        else:
-            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=caption, parse_mode="Markdown", reply_markup=reply_markup)
-    except Exception as e:
-        logging.error(f"Telegram dispatch error: {e}")
+    if token_data['image'] and token_data['image'].startswith("http"):
+        send_telegram_photo(token_data['image'], caption, keyboard)
+    else:
+        send_telegram_message(caption, keyboard)
 
 def check_token_milestones():
-    """
-    Continuously monitors tracked tokens to check if they have hit a 10x multiplier 
-    from their initial callout price, then fires a success alert to Telegram.
-    """
     if not tracked_tokens:
         return
 
@@ -112,16 +134,14 @@ def check_token_milestones():
                             f"🔑 **CA:** `{mint_address}`\n\n"
                             f"🛡️ *Target achieved. Securing the bag, baby.* 6767"
                         )
-                        
-                        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=caption, parse_mode="Markdown")
+                        send_telegram_message(caption)
         except Exception as e:
-            logging.error(f"Milestone tracking error for {mint_address[:8]}: {e}")
+            logging.error(f"Milestone tracking error: {e}")
 
 def run_multichain_sniper_bot():
     logging.info("Omnichain Memecoin Sniper & 10X Tracker Bot active 24/7, baby. 6767.")
     
     while True:
-        # First, scan chains for new alpha callouts
         for chain in SUPPORTED_CHAINS:
             try:
                 search_res = requests.get(f"{DEXSCREENER_SEARCH}{chain}", timeout=10).json()
@@ -167,9 +187,7 @@ def run_multichain_sniper_bot():
                         
             time.sleep(3)
 
-        # Second, check milestones for existing tracked tokens
         check_token_milestones()
-
         time.sleep(15)
 
 if __name__ == "__main__":

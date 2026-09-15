@@ -9,7 +9,6 @@ TELEGRAM_BOT_TOKEN = "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 TELEGRAM_CHAT_ID = "7113872351"
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Multi-Chain Supported Networks
 SUPPORTED_CHAINS = ["solana", "base", "bsc", "ethereum"]
 
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
@@ -19,7 +18,6 @@ RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 tracked_tokens = {}
 
 def send_telegram_message(text, inline_keyboard=None):
-    """Sends a standard text message via Telegram HTTP API"""
     try:
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
@@ -28,13 +26,11 @@ def send_telegram_message(text, inline_keyboard=None):
         }
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-            
         requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=5)
     except Exception as e:
         logging.error(f"Telegram dispatch error: {e}")
 
 def send_telegram_photo(photo_url, caption, inline_keyboard=None):
-    """Sends a photo with a caption; falls back to text if image fails"""
     try:
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
@@ -44,7 +40,6 @@ def send_telegram_photo(photo_url, caption, inline_keyboard=None):
         }
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-            
         res = requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5)
         if res.status_code != 200:
             send_telegram_message(caption, inline_keyboard)
@@ -52,11 +47,7 @@ def send_telegram_photo(photo_url, caption, inline_keyboard=None):
         logging.error(f"Telegram photo error: {e}")
         send_telegram_message(caption, inline_keyboard)
 
-def multi_chain_safety_filter(chain_id, mint_address, market_cap):
-    """
-    Multi-chain safety validator: Filters out honeypots, low liquidity, 
-    and high token concentration across Solana and EVM chains.
-    """
+def multi_chain_safety_filter(chain_id, mint_address):
     try:
         if chain_id == "solana":
             res = requests.get(f"{RUGCHECK_API}{mint_address}/report", timeout=5)
@@ -77,7 +68,7 @@ def multi_chain_safety_filter(chain_id, mint_address, market_cap):
                     if lp_usd >= 5000:
                         return True
     except Exception as e:
-        logging.error(f"Multi-chain safety check error ({chain_id}): {e}")
+        logging.error(f"Safety check error ({chain_id}): {e}")
     return False
 
 def send_multichain_telegram_alert(token_data):
@@ -85,14 +76,14 @@ def send_multichain_telegram_alert(token_data):
     chain_name = token_data["chain"].upper()
     
     caption = (
-        f"🔥 **MULTI-CHAIN ALPHA CALLOUT [{chain_name}]** 🔥\n\n"
+        f"🔥 **FRESH BLOCK-ZERO ALPHA [{chain_name}]** 🔥\n\n"
         f"🪙 **Token:** {token_data['name']} (${token_data['symbol']})\n"
         f"🌐 **Network:** {chain_name}\n"
         f"💵 **Current MC:** ${token_data['mc']:,.0f}\n"
         f"🎯 **Target Exit MC:** ${target_mc:,.0f} (10x)\n"
         f"🔑 **CA:** `{token_data['address']}`\n\n"
-        f"🛡️ *Omnichain Indexer + Security Filtered*\n"
-        f"👶 *Zero random junk, pure cross-chain alpha, baby.* 6767"
+        f"🛡️ *Fresh Launch + Security Filtered*\n"
+        f"👶 *Zero old zombie dumps, pure fresh runners, baby.* 6767"
     )
     
     keyboard = [
@@ -139,9 +130,12 @@ def check_token_milestones():
             logging.error(f"Milestone tracking error: {e}")
 
 def run_multichain_sniper_bot():
-    logging.info("Omnichain Memecoin Sniper & 10X Tracker Bot active 24/7, baby. 6767.")
+    logging.info("Fresh-Launch Omnichain Sniper active 24/7, baby. 6767.")
     
     while True:
+        current_time_ms = time.time() * 1000
+        max_age_ms = 24 * 60 * 60 * 1000  # Strict 24-hour max age filter
+        
         for chain in SUPPORTED_CHAINS:
             try:
                 search_res = requests.get(f"{DEXSCREENER_SEARCH}{chain}", timeout=10).json()
@@ -156,12 +150,17 @@ def run_multichain_sniper_bot():
                     
                 mint_address = p.get("baseToken", {}).get("address", "")
                 market_cap = p.get("marketCap", 0) or p.get("fdv", 0)
+                pair_created_at = p.get("pairCreatedAt", 0)
                 
                 if not mint_address or mint_address in tracked_tokens:
                     continue
+                
+                # FRESHNESS CHECK: Skip anything older than 24 hours (kills zombie dumps)
+                if pair_created_at == 0 or (current_time_ms - pair_created_at > max_age_ms):
+                    continue
                     
                 if 10000 <= market_cap <= 250000:
-                    if multi_chain_safety_filter(chain, mint_address, market_cap):
+                    if multi_chain_safety_filter(chain, mint_address):
                         token_name = p.get("baseToken", {}).get("name", "Unknown")
                         token_symbol = p.get("baseToken", {}).get("symbol", "???")
                         

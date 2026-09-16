@@ -162,20 +162,18 @@ async function checkTokenMilestones() {
     }
 }
 
-// NEW: Real-Time Solana Bonding Curve WebSocket Stream Listener
+// Real-Time Solana Bonding Curve WebSocket Stream Listener
 function monitorSolanaBlockZeroStream() {
-    // Connect to your high-performance Solana RPC WebSocket provider
     const ws = new WebSocket('wss://api.mainnet-beta.solana.com');
 
     ws.on('open', () => {
         console.log("Connected to Solana Block-Zero WebSocket Stream, baby. 6767.");
-        // Subscribe to program logs for Pump.fun or instant factory deployments
         ws.send(JSON.stringify({
             jsonrpc: "2.0",
             id: 1,
             method: "logsSubscribe",
             params: [
-                { mentions: ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"] }, // Pump.fun Program ID
+                { mentions: ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"] },
                 { commitment: "processed" }
             ]
         }));
@@ -186,11 +184,8 @@ function monitorSolanaBlockZeroStream() {
             const response = JSON.parse(data);
             if (response.method === "logsNotification") {
                 const logs = response.params.result.value.logs;
-                
-                // Detect initialize mint event logs from raw block stream
                 if (logs.some(l => l.includes("InitializeMint") || l.includes("Create"))) {
                     console.log("⚡ Block-Zero Genesis Event Detected via WebSocket Stream!");
-                    // Note: In production, extract mint from transaction details or pass to API verification loop
                 }
             }
         } catch (e) {
@@ -215,7 +210,6 @@ function sleep(ms) {
 async function runProOmnichainSniper() {
     console.log("Pro Omnichain & Block-Zero Genesis Sniper active 24/7, baby. 6767.");
     
-    // Initialize real-time Solana blockchain stream listener in the background
     monitorSolanaBlockZeroStream();
     
     while (true) {

@@ -13,15 +13,13 @@ DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
-# Pump.fun & Smart Money Configuration
-PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+# Smart Money Configuration
 SMART_MONEY_WALLETS = [
     # Add target insider/whale solana wallet addresses here to mirror-track
 ]
 
 tracked_tokens = {}
 processed_txs = set()
-processed_mints = set()
 
 async def send_telegram_message(session, text, inline_keyboard=None):
     try:
@@ -96,8 +94,8 @@ async def send_multichain_telegram_alert(session, token_data):
         f"💵 **Current MC:** ${token_data['mc']:,}\n"
         f"🎯 **Target Exit MC:** ${target_mc:,} (10x)\n"
         f"🔑 **CA:** `{token_data['address']}`\n\n"
-        f"🛡️ *Raw WebSocket Stream + Raydium Migration Tracked*\n"
-        f"👶 *Caught at genesis, pure runner energy, baby.* 6767"
+        f"🛡️ *Omnichain Filtered + Raydium Migration Tracked*\n"
+        f"👶 *Pure runner energy, baby.* 6767"
     )
     
     keyboard = [
@@ -165,49 +163,11 @@ async def monitor_solana_block_zero_stream():
                     response = json.loads(message)
                     if response.get("method") == "logsNotification":
                         logs = response.get("params", {}).get("result", {}).get("value", {}).get("logs", [])
-                        if any("InitializeMint" in l or "Create" in l or "migration" in l.lower() for l in logs):
+                        if any("InitializeMint" in l or "migration" in l.lower() for l in logs):
                             print("⚡ Block-Zero Genesis / AMM Migration Event Caught via WebSocket!")
         except Exception as e:
             print(f"Solana Stream WebSocket Error: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
-
-async def monitor_pump_fun_bonding_curve(session):
-    """ Sniffs raw Pump.fun bonding curve creation events milliseconds after deployment """
-    while True:
-        try:
-            async with websockets.connect("wss://api.mainnet-beta.solana.com") as ws:
-                print("Connected to Pump.fun Bonding Curve Underground Stream, baby. 6767.")
-                sub_payload = {
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "logsSubscribe",
-                    "params": [
-                        {"mentions": [PUMP_FUN_PROGRAM_ID]},
-                        {"commitment": "processed"}
-                    ]
-                }
-                await ws.send(json.dumps(sub_payload))
-                async for message in ws:
-                    response = json.loads(message)
-                    if response.get("method") == "logsNotification":
-                        value = response.get("params", {}).get("result", {}).get("value", {})
-                        logs = value.get("logs", [])
-                        signature = value.get("signature", "")
-                        
-                        if any("InitializeAccount" in l or "Create" in l for l in logs):
-                            if signature and signature not in processed_mints:
-                                processed_mints.add(signature)
-                                alert_text = (
-                                    f"🚨 **PUMP.FUN UNDERGROUND GENESIS** 🚨\n\n"
-                                    f"⚡ *Raw Bonding Curve Intercept*\n"
-                                    f"🔑 **Tx Sig:** `{signature}`\n"
-                                    f"🌐 [View on Solscan](https://solscan.io/tx/{signature})\n\n"
-                                    f"👶 *Caught before indexers, pure runner energy, baby.* 6767"
-                                )
-                                await send_telegram_message(session, alert_text)
-        except Exception as e:
-            print(f"Pump.fun Stream WebSocket Error: {e}. Reconnecting in 3 seconds...")
-            await asyncio.sleep(3)
 
 async def monitor_smart_money_wallets(session):
     """ Tracks insider / whale wallet swap signatures in real time """
@@ -243,13 +203,11 @@ async def monitor_smart_money_wallets(session):
             await asyncio.sleep(5)
 
 async def run_pro_omnichain_sniper():
-    print("Pro Omnichain & Underground Genesis Sniper (Python) active 24/7, baby. 6767.")
+    print("Pro Omnichain & Clean Genesis Sniper (Python) active 24/7, baby. 6767.")
     
     async with aiohttp.ClientSession() as session:
-        # Spin up all background WebSocket streams concurrently alongside DexScreener scanning
         await asyncio.gather(
             monitor_solana_block_zero_stream(),
-            monitor_pump_fun_bonding_curve(session),
             monitor_smart_money_wallets(session),
             dexscreener_scanner_loop(session)
         )

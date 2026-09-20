@@ -13,8 +13,15 @@ DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
+# Pump.fun & Smart Money Configuration
+PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+SMART_MONEY_WALLETS = [
+    # Add target insider/whale solana wallet addresses here to mirror-track
+]
+
 tracked_tokens = {}
 processed_txs = set()
+processed_mints = set()
 
 async def send_telegram_message(session, text, inline_keyboard=None):
     try:
@@ -139,10 +146,11 @@ async def check_token_milestones(session):
             print(f"Milestone tracking error: {e}")
 
 async def monitor_solana_block_zero_stream():
+    """ Monitors Raydium AMM migrations and genesis logs """
     while True:
         try:
             async with websockets.connect("wss://api.mainnet-beta.solana.com") as ws:
-                print("Connected to Solana Block-Zero & Raydium Migration WebSocket Stream, baby. 6767.")
+                print("Connected to Solana Block-Zero & Raydium Migration Stream, baby. 6767.")
                 sub_payload = {
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -163,72 +171,149 @@ async def monitor_solana_block_zero_stream():
             print(f"Solana Stream WebSocket Error: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
+async def monitor_pump_fun_bonding_curve(session):
+    """ Sniffs raw Pump.fun bonding curve creation events milliseconds after deployment """
+    while True:
+        try:
+            async with websockets.connect("wss://api.mainnet-beta.solana.com") as ws:
+                print("Connected to Pump.fun Bonding Curve Underground Stream, baby. 6767.")
+                sub_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "logsSubscribe",
+                    "params": [
+                        {"mentions": [PUMP_FUN_PROGRAM_ID]},
+                        {"commitment": "processed"}
+                    ]
+                }
+                await ws.send(json.dumps(sub_payload))
+                async for message in ws:
+                    response = json.loads(message)
+                    if response.get("method") == "logsNotification":
+                        value = response.get("params", {}).get("result", {}).get("value", {})
+                        logs = value.get("logs", [])
+                        signature = value.get("signature", "")
+                        
+                        if any("InitializeAccount" in l or "Create" in l for l in logs):
+                            if signature and signature not in processed_mints:
+                                processed_mints.add(signature)
+                                alert_text = (
+                                    f"🚨 **PUMP.FUN UNDERGROUND GENESIS** 🚨\n\n"
+                                    f"⚡ *Raw Bonding Curve Intercept*\n"
+                                    f"🔑 **Tx Sig:** `{signature}`\n"
+                                    f"🌐 [View on Solscan](https://solscan.io/tx/{signature})\n\n"
+                                    f"👶 *Caught before indexers, pure runner energy, baby.* 6767"
+                                )
+                                await send_telegram_message(session, alert_text)
+        except Exception as e:
+            print(f"Pump.fun Stream WebSocket Error: {e}. Reconnecting in 3 seconds...")
+            await asyncio.sleep(3)
+
+async def monitor_smart_money_wallets(session):
+    """ Tracks insider / whale wallet swap signatures in real time """
+    if not SMART_MONEY_WALLETS:
+        return
+    while True:
+        try:
+            async with websockets.connect("wss://api.mainnet-beta.solana.com") as ws:
+                for idx, wallet in enumerate(SMART_MONEY_WALLETS):
+                    sub_payload = {
+                        "jsonrpc": "2.0",
+                        "id": 10 + idx,
+                        "method": "signatureSubscribe",
+                        "params": [wallet, {"commitment": "processed"}]
+                    }
+                    await ws.send(json.dumps(sub_payload))
+                
+                async for message in ws:
+                    response = json.loads(message)
+                    if response.get("method") == "signatureNotification":
+                        tx_info = response.get("params", {}).get("result", {})
+                        sig = tx_info.get("signature", "")
+                        if sig:
+                            alert_text = (
+                                f"🐳 **SMART MONEY / INSIDER SWAP** 🐳\n\n"
+                                f"🔑 **Tx Sig:** `{sig}`\n"
+                                f"🌐 [Inspect on Solscan](https://solscan.io/tx/{sig})\n\n"
+                                f"🛡️ *Shadow-tracking big player movements, baby.* 6767"
+                            )
+                            await send_telegram_message(session, alert_text)
+        except Exception as e:
+            print(f"Smart Money WebSocket Error: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+
 async def run_pro_omnichain_sniper():
-    print("Pro Omnichain & Block-Zero Genesis Sniper (Python) active 24/7, baby. 6767.")
-    
-    # Background Solana stream listener
-    asyncio.create_task(monitor_solana_block_zero_stream())
+    print("Pro Omnichain & Underground Genesis Sniper (Python) active 24/7, baby. 6767.")
     
     async with aiohttp.ClientSession() as session:
-        while True:
-            current_time_ms = int(time.time() * 1000)
-            max_age_ms = 12 * 60 * 60 * 1000
-            
-            for chain in SUPPORTED_CHAINS:
-                try:
-                    async with session.get(f"{DEXSCREENER_SEARCH}{chain}", timeout=10) as search_res:
-                        if search_res.status != 200:
+        # Spin up all background WebSocket streams concurrently alongside DexScreener scanning
+        await asyncio.gather(
+            monitor_solana_block_zero_stream(),
+            monitor_pump_fun_bonding_curve(session),
+            monitor_smart_money_wallets(session),
+            dexscreener_scanner_loop(session)
+        )
+
+async def dexscreener_scanner_loop(session):
+    while True:
+        current_time_ms = int(time.time() * 1000)
+        max_age_ms = 12 * 60 * 60 * 1000
+        
+        for chain in SUPPORTED_CHAINS:
+            try:
+                async with session.get(f"{DEXSCREENER_SEARCH}{chain}", timeout=10) as search_res:
+                    if search_res.status != 200:
+                        continue
+                    search_json = await search_res.json()
+                    pairs = search_json.get("pairs", [])
+                    
+                    for p in pairs:
+                        if p.get("chainId") != chain:
                             continue
-                        search_json = await search_res.json()
-                        pairs = search_json.get("pairs", [])
                         
-                        for p in pairs:
-                            if p.get("chainId") != chain:
-                                continue
-                            
-                            base_token = p.get("baseToken", {})
-                            mint_address = base_token.get("address")
-                            market_cap = p.get("marketCap") or p.get("fdv") or 0
-                            pair_created_at = p.get("pairCreatedAt", 0)
-                            
-                            if not mint_address or mint_address in tracked_tokens or mint_address in processed_txs:
-                                continue
-                            
-                            if pair_created_at == 0 or (current_time_ms - pair_created_at > max_age_ms):
-                                continue
-                            
-                            if 15000 <= market_cap <= 200000:
-                                passes_intel = await advanced_intelligence_filter(session, chain, mint_address)
-                                if passes_intel:
-                                    processed_txs.add(mint_address)
-                                    token_name = base_token.get("name", "Unknown")
-                                    token_symbol = base_token.get("symbol", "???")
-                                    image_url = p.get("info", {}).get("imageUrl", "https://i.imgur.com/3Z3Z3Z3.png")
-                                    url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
-                                    
-                                    tracked_tokens[mint_address] = {
-                                        "chain": chain,
-                                        "initial_mc": market_cap,
-                                        "name": token_name,
-                                        "symbol": token_symbol,
-                                        "milestone_sent": False
-                                    }
-                                    
-                                    await send_multichain_telegram_alert(session, {
-                                        "chain": chain,
-                                        "name": token_name,
-                                        "symbol": token_symbol,
-                                        "address": mint_address,
-                                        "mc": market_cap,
-                                        "url": url,
-                                        "image": image_url
-                                    })
-                except Exception as e:
-                    print(f"Pro DexScreener fetch error for {chain}: {e}")
-                await asyncio.sleep(2)
-            
-            await check_token_milestones(session)
-            await asyncio.sleep(10)
+                        base_token = p.get("baseToken", {})
+                        mint_address = base_token.get("address")
+                        market_cap = p.get("marketCap") or p.get("fdv") or 0
+                        pair_created_at = p.get("pairCreatedAt", 0)
+                        
+                        if not mint_address or mint_address in tracked_tokens or mint_address in processed_txs:
+                            continue
+                        
+                        if pair_created_at == 0 or (current_time_ms - pair_created_at > max_age_ms):
+                            continue
+                        
+                        if 15000 <= market_cap <= 200000:
+                            passes_intel = await advanced_intelligence_filter(session, chain, mint_address)
+                            if passes_intel:
+                                processed_txs.add(mint_address)
+                                token_name = base_token.get("name", "Unknown")
+                                token_symbol = base_token.get("symbol", "???")
+                                image_url = p.get("info", {}).get("imageUrl", "https://i.imgur.com/3Z3Z3Z3.png")
+                                url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
+                                
+                                tracked_tokens[mint_address] = {
+                                    "chain": chain,
+                                    "initial_mc": market_cap,
+                                    "name": token_name,
+                                    "symbol": token_symbol,
+                                    "milestone_sent": False
+                                }
+                                
+                                await send_multichain_telegram_alert(session, {
+                                    "chain": chain,
+                                    "name": token_name,
+                                    "symbol": token_symbol,
+                                    "address": mint_address,
+                                    "mc": market_cap,
+                                    "url": url,
+                                    "image": image_url
+                                })
+            except Exception as e:
+                print(f"Pro DexScreener fetch error for {chain}: {e}")
+            await asyncio.sleep(2)
+        
+        await check_token_milestones(session)
+        await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(run_pro_omnichain_sniper())

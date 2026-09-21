@@ -8,12 +8,12 @@ TELEGRAM_BOT_TOKEN = "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 TELEGRAM_CHAT_ID = "7113872351"
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-SUPPORTED_CHAINS = ["solana", "base", "bsc", "ethereum"]
+# Locked to Solana, Base, BSC, and Robinhood Chain
+SUPPORTED_CHAINS = ["solana", "base", "bsc", "robinhood"]
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
-# Smart Money Configuration
 SMART_MONEY_WALLETS = [
     # Add target insider/whale solana wallet addresses here to mirror-track
 ]
@@ -52,7 +52,7 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
         print(f"Telegram photo error: {e}")
         await send_telegram_message(session, caption, inline_keyboard)
 
-async def advanced_intelligence_filter(session, chain_id, mint_address):
+async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data):
     try:
         if chain_id == "solana":
             async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=5) as res:
@@ -66,19 +66,21 @@ async def advanced_intelligence_filter(session, chain_id, mint_address):
                     is_mintable = any(r.get("name", "").lower().find("mint") != -1 for r in risks)
                     is_freezable = any(r.get("name", "").lower().find("freeze") != -1 for r in risks)
                     
-                    if risk_score <= 600 and not is_mintable and not is_freezable and concentrated_supply < 45:
+                    if risk_score <= 400 and not is_mintable and not is_freezable and concentrated_supply < 40:
                         return True
         else:
-            async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
-                if res.status == 200:
-                    data = await res.json()
-                    pairs = data.get("pairs", [])
-                    if pairs:
-                        lp_usd = pairs[0].get("liquidity", {}).get("usd", 0)
-                        txns = pairs[0].get("txns", {}).get("h24", {})
-                        txns_24h = txns.get("buys", 0) + txns.get("sells", 0)
-                        if lp_usd >= 8000 and txns_24h > 50:
-                            return True
+            lp_usd = pair_data.get("liquidity", {}).get("usd", 0)
+            txns = pair_data.get("txns", {}).get("h24", {})
+            buys = txns.get("buys", 0)
+            sells = txns.get("sells", 0)
+            
+            info = pair_data.get("info", {})
+            websites = info.get("websites", [])
+            socials = info.get("socials", [])
+            
+            if lp_usd >= 12000 and (buys + sells) > 80 and abs(buys - sells) < (buys + sells) * 0.7:
+                if len(websites) > 0 or len(socials) > 0:
+                    return True
     except Exception as e:
         print(f"Advanced intelligence check error ({chain_id}): {e}")
     return False
@@ -88,13 +90,13 @@ async def send_multichain_telegram_alert(session, token_data):
     chain_name = token_data["chain"].upper()
     
     caption = (
-        f"⚡ **BLOCK-ZERO ALPHA [{chain_name}]** ⚡\n\n"
+        f"⚡ **HARD-FILTERED ALPHA [{chain_name}]** ⚡\n\n"
         f"🪙 **Token:** {token_data['name']} (${token_data['symbol']})\n"
         f"🌐 **Network:** {chain_name}\n"
         f"💵 **Current MC:** ${token_data['mc']:,}\n"
         f"🎯 **Target Exit MC:** ${target_mc:,} (10x)\n"
         f"🔑 **CA:** `{token_data['address']}`\n\n"
-        f"🛡️ *Omnichain Filtered + Raydium Migration Tracked*\n"
+        f"🛡️ *Anti-Rug / Real Volume Verified*\n"
         f"👶 *Pure runner energy, baby.* 6767"
     )
     
@@ -103,8 +105,10 @@ async def send_multichain_telegram_alert(session, token_data):
         [{"text": "⚡ View Pool", "url": token_data["url"]}]
     ]
     
-    if token_data["image"] and token_data["image"].startswith("http"):
-        await send_telegram_photo(session, token_data["image"], caption, keyboard)
+    # Only send photo if a genuine token image exists (no fake placeholders)
+    image_url = token_data.get("image")
+    if image_url and image_url.startswith("http") and "imgur" not in image_url:
+        await send_telegram_photo(session, image_url, caption, keyboard)
     else:
         await send_telegram_message(session, caption, keyboard)
 
@@ -130,13 +134,13 @@ async def check_token_milestones(session):
                             chain_name = data["chain"].upper()
                             
                             caption = (
-                                f"🎉 **10X BLOCK-ZERO MILESTONE REACHED!** 🎉\n\n"
+                                f"🎉 **10X HARD-FILTERED MILESTONE REACHED!** 🎉\n\n"
                                 f"🪙 **Token:** {data['name']} (${data['symbol']})\n"
                                 f"🌐 **Network:** {chain_name}\n"
                                 f"💵 **Initial MC:** ${initial_mc:,}\n"
                                 f"🚀 **Current MC:** ${current_mc:,} (10x+ Locked!)\n"
                                 f"🔑 **CA:** `{mint_address}`\n\n"
-                                f"🛡️ *Genesis target achieved. Securing the bag, baby.* 6767"
+                                f"🛡️ *Target secured, baby.* 6767"
                             )
                             
                             await send_telegram_message(session, caption)
@@ -144,11 +148,9 @@ async def check_token_milestones(session):
             print(f"Milestone tracking error: {e}")
 
 async def monitor_solana_block_zero_stream():
-    """ Monitors Raydium AMM migrations and genesis logs """
     while True:
         try:
             async with websockets.connect("wss://api.mainnet-beta.solana.com") as ws:
-                print("Connected to Solana Block-Zero & Raydium Migration Stream, baby. 6767.")
                 sub_payload = {
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -166,11 +168,9 @@ async def monitor_solana_block_zero_stream():
                         if any("InitializeMint" in l or "migration" in l.lower() for l in logs):
                             print("⚡ Block-Zero Genesis / AMM Migration Event Caught via WebSocket!")
         except Exception as e:
-            print(f"Solana Stream WebSocket Error: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
 async def monitor_smart_money_wallets(session):
-    """ Tracks insider / whale wallet swap signatures in real time """
     if not SMART_MONEY_WALLETS:
         return
     while True:
@@ -199,12 +199,10 @@ async def monitor_smart_money_wallets(session):
                             )
                             await send_telegram_message(session, alert_text)
         except Exception as e:
-            print(f"Smart Money WebSocket Error: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
 async def run_pro_omnichain_sniper():
-    print("Pro Omnichain & Clean Genesis Sniper (Python) active 24/7, baby. 6767.")
-    
+    print("Pro Custom-Chain & Clean Alert Sniper (Python) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(),
@@ -215,7 +213,7 @@ async def run_pro_omnichain_sniper():
 async def dexscreener_scanner_loop(session):
     while True:
         current_time_ms = int(time.time() * 1000)
-        max_age_ms = 12 * 60 * 60 * 1000
+        max_age_ms = 6 * 60 * 60 * 1000  # 6 hours max age for fresh runners
         
         for chain in SUPPORTED_CHAINS:
             try:
@@ -240,13 +238,13 @@ async def dexscreener_scanner_loop(session):
                         if pair_created_at == 0 or (current_time_ms - pair_created_at > max_age_ms):
                             continue
                         
-                        if 15000 <= market_cap <= 200000:
-                            passes_intel = await advanced_intelligence_filter(session, chain, mint_address)
+                        if 10000 <= market_cap <= 150000:
+                            passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p)
                             if passes_intel:
                                 processed_txs.add(mint_address)
                                 token_name = base_token.get("name", "Unknown")
                                 token_symbol = base_token.get("symbol", "???")
-                                image_url = p.get("info", {}).get("imageUrl", "https://i.imgur.com/3Z3Z3Z3.png")
+                                image_url = p.get("info", {}).get("imageUrl")
                                 url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
                                 
                                 tracked_tokens[mint_address] = {
@@ -268,10 +266,10 @@ async def dexscreener_scanner_loop(session):
                                 })
             except Exception as e:
                 print(f"Pro DexScreener fetch error for {chain}: {e}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         
         await check_token_milestones(session)
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(run_pro_omnichain_sniper())

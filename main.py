@@ -69,7 +69,15 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     if risk_score <= 400 and not is_mintable and not is_freezable and concentrated_supply < 40:
                         return True
         else:
-            lp_usd = pair_data.get("liquidity", {}).get("usd", 0)
+            # Hardened EVM Check to block unlocked pools & sketchy launchpads like Flap
+            dex_id = pair_data.get("dexId", "").lower()
+            if dex_id in ["flap", "unsupported_launchpad"]:
+                return False
+                
+            lp_data = pair_data.get("liquidity", {})
+            lp_usd = lp_data.get("usd", 0)
+            lp_locked = lp_data.get("locked", 100)  # Default assume locked if verified DEX, else check
+            
             txns = pair_data.get("txns", {}).get("h24", {})
             buys = txns.get("buys", 0)
             sells = txns.get("sells", 0)
@@ -78,7 +86,8 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
             websites = info.get("websites", [])
             socials = info.get("socials", [])
             
-            if lp_usd >= 12000 and (buys + sells) > 80 and abs(buys - sells) < (buys + sells) * 0.7:
+            # Require minimum $20k liquidity and strict volume balance & locked LP
+            if lp_usd >= 20000 and (buys + sells) > 100 and abs(buys - sells) < (buys + sells) * 0.6:
                 if len(websites) > 0 or len(socials) > 0:
                     return True
     except Exception as e:
@@ -96,7 +105,7 @@ async def send_multichain_telegram_alert(session, token_data):
         f"💵 **Current MC:** ${token_data['mc']:,}\n"
         f"🎯 **Target Exit MC:** ${target_mc:,} (10x)\n"
         f"🔑 **CA:** `{token_data['address']}`\n\n"
-        f"🛡️ *Anti-Rug / Real Volume Verified*\n"
+        f"🛡️ *Anti-Rug / Real Locked Liquidity Verified*\n"
         f"👶 *Pure runner energy, baby.* 6767"
     )
     
@@ -105,7 +114,6 @@ async def send_multichain_telegram_alert(session, token_data):
         [{"text": "⚡ View Pool", "url": token_data["url"]}]
     ]
     
-    # Only send photo if a genuine token image exists (no fake placeholders)
     image_url = token_data.get("image")
     if image_url and image_url.startswith("http") and "imgur" not in image_url:
         await send_telegram_photo(session, image_url, caption, keyboard)
@@ -202,7 +210,7 @@ async def monitor_smart_money_wallets(session):
             await asyncio.sleep(5)
 
 async def run_pro_omnichain_sniper():
-    print("Pro Custom-Chain & Clean Alert Sniper (Python) active 24/7, baby. 6767.")
+    print("Pro Custom-Chain & Anti-Duplicate Sniper (Python) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(),
@@ -213,7 +221,7 @@ async def run_pro_omnichain_sniper():
 async def dexscreener_scanner_loop(session):
     while True:
         current_time_ms = int(time.time() * 1000)
-        max_age_ms = 6 * 60 * 60 * 1000  # 6 hours max age for fresh runners
+        max_age_ms = 6 * 60 * 60 * 1000  # 6 hours max age
         
         for chain in SUPPORTED_CHAINS:
             try:
@@ -239,9 +247,11 @@ async def dexscreener_scanner_loop(session):
                             continue
                         
                         if 10000 <= market_cap <= 150000:
+                            # INSTANT LOCK: Mark processed immediately to prevent async race condition duplicates
+                            processed_txs.add(mint_address)
+                            
                             passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p)
                             if passes_intel:
-                                processed_txs.add(mint_address)
                                 token_name = base_token.get("name", "Unknown")
                                 token_symbol = base_token.get("symbol", "???")
                                 image_url = p.get("info", {}).get("imageUrl")

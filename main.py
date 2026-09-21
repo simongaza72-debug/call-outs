@@ -14,12 +14,14 @@ DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
+# Insiders, Dev-Clusters, and Smart Money Wallets for High-Conviction Mirror Tracking
 SMART_MONEY_WALLETS = [
-    # Add target insider/whale solana wallet addresses here to mirror-track
+    # Populated dynamically or via tracking cluster nodes
 ]
 
 tracked_tokens = {}
 processed_txs = set()
+insider_alerted_mints = set()
 
 async def send_telegram_message(session, text, inline_keyboard=None):
     try:
@@ -66,7 +68,6 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     is_mintable = any(r.get("name", "").lower().find("mint") != -1 for r in risks)
                     is_freezable = any(r.get("name", "").lower().find("freeze") != -1 for r in risks)
                     
-                    # Relaxed risk tolerance slightly to catch fast-moving runners like FAMILY
                     if risk_score <= 600 and not is_mintable and not is_freezable and concentrated_supply < 50:
                         return True
         else:
@@ -80,10 +81,6 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
             txns = pair_data.get("txns", {}).get("h24", {})
             buys = txns.get("buys", 0)
             sells = txns.get("sells", 0)
-            
-            info = pair_data.get("info", {})
-            websites = info.get("websites", [])
-            socials = info.get("socials", [])
             
             if lp_usd >= 10000 and (buys + sells) > 50:
                 return True
@@ -152,7 +149,7 @@ async def check_token_milestones(session):
         except Exception as e:
             print(f"Milestone tracking error: {e}")
 
-async def monitor_solana_block_zero_stream():
+async def monitor_solana_block_zero_stream(session):
     while True:
         try:
             async with websockets.connect("wss://api.mainnet-beta.solana.com") as ws:
@@ -173,13 +170,16 @@ async def monitor_solana_block_zero_stream():
                         if any("InitializeMint" in l or "migration" in l.lower() for l in logs):
                             print("⚡ Block-Zero Genesis / AMM Migration Event Caught via WebSocket!")
         except Exception as e:
+            print(f"Solana block-zero stream error: {e}")
             await asyncio.sleep(5)
 
 async def monitor_smart_money_wallets(session):
-    if not SMART_MONEY_WALLETS:
-        return
     while True:
         try:
+            if not SMART_MONEY_WALLETS:
+                await asyncio.sleep(10)
+                continue
+                
             async with websockets.connect("wss://api.mainnet-beta.solana.com") as ws:
                 for idx, wallet in enumerate(SMART_MONEY_WALLETS):
                     sub_payload = {
@@ -197,20 +197,21 @@ async def monitor_smart_money_wallets(session):
                         sig = tx_info.get("signature", "")
                         if sig:
                             alert_text = (
-                                f"🐳 **SMART MONEY / INSIDER SWAP** 🐳\n\n"
+                                f"🐳 **INSIDER / SMART MONEY ACCUMULATION** 🐳\n\n"
                                 f"🔑 **Tx Sig:** `{sig}`\n"
                                 f"🌐 [Inspect on Solscan](https://solscan.io/tx/{sig})\n\n"
-                                f"🛡️ *Shadow-tracking big player movements, baby.* 6767"
+                                f"🛡️ *Shadow-tracking high-conviction dev flows, baby.* 6767"
                             )
                             await send_telegram_message(session, alert_text)
         except Exception as e:
+            print(f"Smart money websocket error: {e}")
             await asyncio.sleep(5)
 
 async def run_pro_omnichain_sniper():
-    print("Pro Expanded-Cap & Anti-Duplicate Sniper (Python) active 24/7, baby. 6767.")
+    print("Pro Expanded-Cap, Insider Strategy & Anti-Duplicate Sniper (Python) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
-            monitor_solana_block_zero_stream(),
+            monitor_solana_block_zero_stream(session),
             monitor_smart_money_wallets(session),
             dexscreener_scanner_loop(session)
         )
@@ -243,7 +244,7 @@ async def dexscreener_scanner_loop(session):
                         if pair_created_at == 0 or (current_time_ms - pair_created_at > max_age_ms):
                             continue
                         
-                        # Expanded Market Cap Range: Now catches tokens from $10K all the way up to $2,000,000 ($2M)
+                        # Expanded Market Cap Range: Catches tokens from $10K up to $2,000,000
                         if 10000 <= market_cap <= 2000000:
                             processed_txs.add(mint_address)
                             

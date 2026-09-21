@@ -66,17 +66,16 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     is_mintable = any(r.get("name", "").lower().find("mint") != -1 for r in risks)
                     is_freezable = any(r.get("name", "").lower().find("freeze") != -1 for r in risks)
                     
-                    if risk_score <= 400 and not is_mintable and not is_freezable and concentrated_supply < 40:
+                    # Relaxed risk tolerance slightly to catch fast-moving runners like FAMILY
+                    if risk_score <= 600 and not is_mintable and not is_freezable and concentrated_supply < 50:
                         return True
         else:
-            # Hardened EVM Check to block unlocked pools & sketchy launchpads like Flap
             dex_id = pair_data.get("dexId", "").lower()
             if dex_id in ["flap", "unsupported_launchpad"]:
                 return False
                 
             lp_data = pair_data.get("liquidity", {})
             lp_usd = lp_data.get("usd", 0)
-            lp_locked = lp_data.get("locked", 100)  # Default assume locked if verified DEX, else check
             
             txns = pair_data.get("txns", {}).get("h24", {})
             buys = txns.get("buys", 0)
@@ -86,10 +85,8 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
             websites = info.get("websites", [])
             socials = info.get("socials", [])
             
-            # Require minimum $20k liquidity and strict volume balance & locked LP
-            if lp_usd >= 20000 and (buys + sells) > 100 and abs(buys - sells) < (buys + sells) * 0.6:
-                if len(websites) > 0 or len(socials) > 0:
-                    return True
+            if lp_usd >= 10000 and (buys + sells) > 50:
+                return True
     except Exception as e:
         print(f"Advanced intelligence check error ({chain_id}): {e}")
     return False
@@ -105,7 +102,7 @@ async def send_multichain_telegram_alert(session, token_data):
         f"💵 **Current MC:** ${token_data['mc']:,}\n"
         f"🎯 **Target Exit MC:** ${target_mc:,} (10x)\n"
         f"🔑 **CA:** `{token_data['address']}`\n\n"
-        f"🛡️ *Anti-Rug / Real Locked Liquidity Verified*\n"
+        f"🛡️ *Anti-Rug / Momentum Verified*\n"
         f"👶 *Pure runner energy, baby.* 6767"
     )
     
@@ -210,7 +207,7 @@ async def monitor_smart_money_wallets(session):
             await asyncio.sleep(5)
 
 async def run_pro_omnichain_sniper():
-    print("Pro Custom-Chain & Anti-Duplicate Sniper (Python) active 24/7, baby. 6767.")
+    print("Pro Expanded-Cap & Anti-Duplicate Sniper (Python) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(),
@@ -246,8 +243,8 @@ async def dexscreener_scanner_loop(session):
                         if pair_created_at == 0 or (current_time_ms - pair_created_at > max_age_ms):
                             continue
                         
-                        if 10000 <= market_cap <= 150000:
-                            # INSTANT LOCK: Mark processed immediately to prevent async race condition duplicates
+                        # Expanded Market Cap Range: Now catches tokens from $10K all the way up to $2,000,000 ($2M)
+                        if 10000 <= market_cap <= 2000000:
                             processed_txs.add(mint_address)
                             
                             passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p)

@@ -44,7 +44,7 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5) as response:
             if response.status != 200:
-                # Removed text fallback to completely eliminate duplicate alerts
+                # Suppressed duplicate text fallback to prevent double-messaging
                 print(f"Photo send rejected by Telegram, skipping photo to prevent duplicates.")
     except Exception as e:
         print(f"Telegram photo error: {e}")
@@ -108,6 +108,41 @@ async def send_multichain_telegram_alert(session, token_data):
         await send_telegram_photo(session, image_url, caption, keyboard)
     else:
         await send_telegram_message(session, caption, keyboard)
+
+async def check_token_milestones(session):
+    if not tracked_tokens:
+        return
+
+    for mint_address, data in list(tracked_tokens.items()):
+        if data["milestone_sent"]:
+            continue
+        
+        try:
+            async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
+                if res.status == 200:
+                    json_data = await res.json()
+                    pairs = json_data.get("pairs", [])
+                    if pairs:
+                        current_mc = pairs[0].get("marketCap") or pairs[0].get("fdv") or 0
+                        initial_mc = data["initial_mc"]
+                        
+                        if current_mc >= initial_mc * 10:
+                            tracked_tokens[mint_address]["milestone_sent"] = True
+                            chain_name = data["chain"].upper()
+                            
+                            caption = (
+                                f"🎉 **10X SWEET-SPOT MILESTONE REACHED!** 🎉\n\n"
+                                f"🪙 **Token:** {data['name']} (${data['symbol']})\n"
+                                f"🌐 **Network:** {chain_name}\n"
+                                f"💵 **Initial Call MC:** ${initial_mc:,}\n"
+                                f"🚀 **Current MC:** ${current_mc:,} (10x+ Locked!)\n"
+                                f"🔑 **CA:** `{mint_address}`\n\n"
+                                f"🛡️ *Target secured, baby.* 6767"
+                            )
+                            
+                            await send_telegram_message(session, caption)
+        except Exception as e:
+            print(f"Milestone tracking error: {e}")
 
 async def process_token_discovery(session, chain, mint_address):
     async with processing_lock:
@@ -212,12 +247,18 @@ async def dexscreener_profiles_loop(session):
             print(f"DexScreener profile fetch error: {e}")
         await asyncio.sleep(5)
 
+async def milestone_checker_loop(session):
+    while True:
+        await check_token_milestones(session)
+        await asyncio.sleep(15)
+
 async def run_pro_omnichain_sniper():
-    print("Sweet-Spot Sniper ($50K-$150K, No Duplicates) active 24/7, baby. 6767.")
+    print("Full-Stack Sniper ($50K-$150K + 10X Milestone Tracker) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(session),
-            dexscreener_profiles_loop(session)
+            dexscreener_profiles_loop(session),
+            milestone_checker_loop(session)
         )
 
 if __name__ == "__main__":

@@ -44,7 +44,6 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5) as response:
             if response.status != 200:
-                # Suppressed duplicate text fallback to prevent double-messaging
                 print(f"Photo send rejected by Telegram, skipping photo to prevent duplicates.")
     except Exception as e:
         print(f"Telegram photo error: {e}")
@@ -66,16 +65,21 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     if risk_score <= 400 and not is_mintable and not is_freezable and concentrated_supply < 40:
                         return True
         elif chain_id == "robinhood":
-            lp_data = pair_data.get("liquidity", {})
-            lp_usd = lp_data.get("usd", 0)
+            lp_info = pair_data.get("liquidity", {})
+            if not lp_info or not isinstance(lp_info, dict):
+                return False
             
-            # Enforce strict liquidity floor for Robinhood chain
+            # Safely parse liquidity to avoid type errors or bypassed nulls
+            raw_usd = lp_info.get("usd", 0)
+            lp_usd = float(raw_usd) if raw_usd is not None else 0.0
+            
+            # Hard liquidity floor to block rugged or low-liquidity pools
             if lp_usd < 15000:
                 return False
                 
             txns = pair_data.get("txns", {}).get("h24", {})
-            buys = txns.get("buys", 0)
-            sells = txns.get("sells", 0)
+            buys = int(txns.get("buys", 0) or 0)
+            sells = int(txns.get("sells", 0) or 0)
             
             if (buys + sells) >= 30:
                 return True
@@ -88,13 +92,13 @@ async def send_multichain_telegram_alert(session, token_data):
     chain_name = token_data["chain"].upper()
     
     caption = (
-        f"⚡ **SWEET-SPOT ALPHA [{chain_name}]** ⚡\n\n"
+        f"⚡ **SECURE SWEET-SPOT ALPHA [{chain_name}]** ⚡\n\n"
         f"🪙 **Token:** {token_data['name']} (${token_data['symbol']})\n"
         f"🌐 **Network:** {chain_name}\n"
         f"💵 **Current MC:** ${token_data['mc']:,}\n"
         f"🎯 **Target Exit MC:** ${target_mc:,} (10x)\n"
         f"🔑 **CA:** `{token_data['address']}`\n\n"
-        f"🛡️ *Verified Liquidity & Safety Passed*\n"
+        f"🛡️ *Strict Liquidity & Safety Verified*\n"
         f"👶 *Pure runner energy, baby.* 6767"
     )
     
@@ -144,9 +148,15 @@ async def check_token_milestones(session):
         except Exception as e:
             print(f"Milestone tracking error: {e}")
 
-async def process_token_discovery(session, chain, mint_address):
+async def process_token_discovery(session, chain, raw_mint):
+    if not raw_mint:
+        return
+    
+    # Normalize address to lowercase to completely prevent casing-based double sends
+    mint_address = raw_mint.strip().lower()
+
     async with processing_lock:
-        if not mint_address or mint_address in tracked_tokens or mint_address in processed_txs:
+        if mint_address in tracked_tokens or mint_address in processed_txs:
             return
         processed_txs.add(mint_address)
     
@@ -253,7 +263,7 @@ async def milestone_checker_loop(session):
         await asyncio.sleep(15)
 
 async def run_pro_omnichain_sniper():
-    print("Full-Stack Sniper ($50K-$150K + 10X Milestone Tracker) active 24/7, baby. 6767.")
+    print("Fully Sanitized Sniper ($50K-$150K + Strict Liquidity Floor) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(session),

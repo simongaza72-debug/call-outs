@@ -35,7 +35,6 @@ def save_persistence(processed_set, tracked_dict):
     except Exception as e:
         print(f"Error saving persistence file: {e}")
 
-# Load persistent state so reboots never trigger duplicate calls
 processed_txs, tracked_tokens = load_persistence()
 processing_lock = asyncio.Lock()
 
@@ -93,7 +92,6 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
             raw_usd = lp_info.get("usd", 0)
             lp_usd = float(raw_usd) if raw_usd is not None else 0.0
             
-            # Strict liquidity floor to block rugged or low-liquidity pools
             if lp_usd < 15000:
                 return False
                 
@@ -200,10 +198,15 @@ async def process_token_discovery(session, chain, raw_mint):
             if 50000 <= market_cap <= 150000:
                 passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p)
                 if passes_intel:
+                    image_url = p.get("info", {}).get("imageUrl")
+                    
+                    # 🔴 NO LOGO FIX: Reject tokens if the dev didn't upload a logo to DexScreener
+                    if not image_url:
+                        return
+                        
                     base_token = p.get("baseToken", {})
                     token_name = base_token.get("name", "Unknown")
                     token_symbol = base_token.get("symbol", "???")
-                    image_url = p.get("info", {}).get("imageUrl")
                     url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
                     
                     tracked_tokens[mint_address] = {
@@ -290,7 +293,7 @@ async def milestone_checker_loop(session):
         await asyncio.sleep(15)
 
 async def run_pro_omnichain_sniper():
-    print("Persistent Sanitized Sniper ($50K-$150K + Disk Memory) active 24/7, baby. 6767.")
+    print("Persistent Sanitized Sniper ($50K-$150K + Disk Memory + Logo Check) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(session),

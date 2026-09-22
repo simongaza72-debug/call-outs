@@ -14,12 +14,9 @@ DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
-SMART_MONEY_WALLETS = [
-    # Add target insider/whale solana wallet addresses here to mirror-track
-]
-
 tracked_tokens = {}
 processed_txs = set()
+processing_lock = asyncio.Lock()  # Atomic lock prevents double-processing entirely
 
 async def send_telegram_message(session, text, inline_keyboard=None):
     try:
@@ -47,10 +44,10 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5) as response:
             if response.status != 200:
-                await send_telegram_message(session, caption, inline_keyboard)
+                # Removed text fallback to completely eliminate duplicate alerts
+                print(f"Photo send rejected by Telegram, skipping photo to prevent duplicates.")
     except Exception as e:
         print(f"Telegram photo error: {e}")
-        await send_telegram_message(session, caption, inline_keyboard)
 
 async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data):
     try:
@@ -66,17 +63,21 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     is_mintable = any(r.get("name", "").lower().find("mint") != -1 for r in risks)
                     is_freezable = any(r.get("name", "").lower().find("freeze") != -1 for r in risks)
                     
-                    if risk_score <= 700 and not is_mintable and not is_freezable and concentrated_supply < 60:
+                    if risk_score <= 400 and not is_mintable and not is_freezable and concentrated_supply < 40:
                         return True
         elif chain_id == "robinhood":
             lp_data = pair_data.get("liquidity", {})
             lp_usd = lp_data.get("usd", 0)
+            
+            # Enforce strict liquidity floor for Robinhood chain
+            if lp_usd < 15000:
+                return False
+                
             txns = pair_data.get("txns", {}).get("h24", {})
             buys = txns.get("buys", 0)
             sells = txns.get("sells", 0)
             
-            # Optimized for Robinhood Chain's high-speed RWA & meme activity
-            if lp_usd >= 5000 and (buys + sells) > 20:
+            if (buys + sells) >= 30:
                 return True
     except Exception as e:
         print(f"Advanced intelligence check error ({chain_id}): {e}")
@@ -87,13 +88,13 @@ async def send_multichain_telegram_alert(session, token_data):
     chain_name = token_data["chain"].upper()
     
     caption = (
-        f"⚡ **SOL & ROBINHOOD ALPHA [{chain_name}]** ⚡\n\n"
+        f"⚡ **SWEET-SPOT ALPHA [{chain_name}]** ⚡\n\n"
         f"🪙 **Token:** {token_data['name']} (${token_data['symbol']})\n"
         f"🌐 **Network:** {chain_name}\n"
         f"💵 **Current MC:** ${token_data['mc']:,}\n"
         f"🎯 **Target Exit MC:** ${target_mc:,} (10x)\n"
         f"🔑 **CA:** `{token_data['address']}`\n\n"
-        f"🛡️ *Momentum & Safety Verified*\n"
+        f"🛡️ *Verified Liquidity & Safety Passed*\n"
         f"👶 *Pure runner energy, baby.* 6767"
     )
     
@@ -109,10 +110,10 @@ async def send_multichain_telegram_alert(session, token_data):
         await send_telegram_message(session, caption, keyboard)
 
 async def process_token_discovery(session, chain, mint_address):
-    if not mint_address or mint_address in tracked_tokens or mint_address in processed_txs:
-        return
-    
-    processed_txs.add(mint_address)
+    async with processing_lock:
+        if not mint_address or mint_address in tracked_tokens or mint_address in processed_txs:
+            return
+        processed_txs.add(mint_address)
     
     try:
         async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
@@ -126,8 +127,8 @@ async def process_token_discovery(session, chain, mint_address):
             p = pairs[0]
             market_cap = p.get("marketCap") or p.get("fdv") or 0
             
-            # Expanded ceiling up to $5,000,000 to catch mid-run pumps
-            if 10000 <= market_cap <= 5000000:
+            # STRICT RANGE: $50K to $150K Market Cap
+            if 50000 <= market_cap <= 150000:
                 passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p)
                 if passes_intel:
                     base_token = p.get("baseToken", {})
@@ -212,7 +213,7 @@ async def dexscreener_profiles_loop(session):
         await asyncio.sleep(5)
 
 async def run_pro_omnichain_sniper():
-    print("Solana & Robinhood Chain Exclusive Sniper active 24/7, baby. 6767.")
+    print("Sweet-Spot Sniper ($50K-$150K, No Duplicates) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(session),

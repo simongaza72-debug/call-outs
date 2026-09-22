@@ -1,6 +1,6 @@
 import asyncio
 import json
-import time
+import os
 import aiohttp
 import websockets
 
@@ -8,15 +8,36 @@ TELEGRAM_BOT_TOKEN = "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 TELEGRAM_CHAT_ID = "7113872351"
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Locked exclusively to Solana and Robinhood Chain
 SUPPORTED_CHAINS = ["solana", "robinhood"]
 DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
-tracked_tokens = {}
-processed_txs = set()
-processing_lock = asyncio.Lock()  # Atomic lock prevents double-processing entirely
+PERSISTENCE_FILE = "processed_tokens.json"
+
+def load_persistence():
+    if os.path.exists(PERSISTENCE_FILE):
+        try:
+            with open(PERSISTENCE_FILE, "r") as f:
+                data = json.load(f)
+                return set(data.get("processed", [])), data.get("tracked", {})
+        except Exception as e:
+            print(f"Error loading persistence file: {e}")
+    return set(), {}
+
+def save_persistence(processed_set, tracked_dict):
+    try:
+        with open(PERSISTENCE_FILE, "w") as f:
+            json.dump({
+                "processed": list(processed_set),
+                "tracked": tracked_dict
+            }, f)
+    except Exception as e:
+        print(f"Error saving persistence file: {e}")
+
+# Load persistent state so reboots never trigger duplicate calls
+processed_txs, tracked_tokens = load_persistence()
+processing_lock = asyncio.Lock()
 
 async def send_telegram_message(session, text, inline_keyboard=None):
     try:
@@ -69,11 +90,10 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
             if not lp_info or not isinstance(lp_info, dict):
                 return False
             
-            # Safely parse liquidity to avoid type errors or bypassed nulls
             raw_usd = lp_info.get("usd", 0)
             lp_usd = float(raw_usd) if raw_usd is not None else 0.0
             
-            # Hard liquidity floor to block rugged or low-liquidity pools
+            # Strict liquidity floor to block rugged or low-liquidity pools
             if lp_usd < 15000:
                 return False
                 
@@ -117,6 +137,7 @@ async def check_token_milestones(session):
     if not tracked_tokens:
         return
 
+    updated = False
     for mint_address, data in list(tracked_tokens.items()):
         if data["milestone_sent"]:
             continue
@@ -132,6 +153,7 @@ async def check_token_milestones(session):
                         
                         if current_mc >= initial_mc * 10:
                             tracked_tokens[mint_address]["milestone_sent"] = True
+                            updated = True
                             chain_name = data["chain"].upper()
                             
                             caption = (
@@ -147,12 +169,14 @@ async def check_token_milestones(session):
                             await send_telegram_message(session, caption)
         except Exception as e:
             print(f"Milestone tracking error: {e}")
+            
+    if updated:
+        save_persistence(processed_txs, tracked_tokens)
 
 async def process_token_discovery(session, chain, raw_mint):
     if not raw_mint:
         return
     
-    # Normalize address to lowercase to completely prevent casing-based double sends
     mint_address = raw_mint.strip().lower()
 
     async with processing_lock:
@@ -161,7 +185,7 @@ async def process_token_discovery(session, chain, raw_mint):
         processed_txs.add(mint_address)
     
     try:
-        async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
+        async with session.get(DEXSCREENER_TOKEN + mint_address, timeout=5) as res:
             if res.status != 200:
                 return
             data = await res.json()
@@ -189,6 +213,9 @@ async def process_token_discovery(session, chain, raw_mint):
                         "symbol": token_symbol,
                         "milestone_sent": False
                     }
+                    
+                    # Save state immediately to disk
+                    save_persistence(processed_txs, tracked_tokens)
                     
                     await send_multichain_telegram_alert(session, {
                         "chain": chain,
@@ -263,7 +290,7 @@ async def milestone_checker_loop(session):
         await asyncio.sleep(15)
 
 async def run_pro_omnichain_sniper():
-    print("Fully Sanitized Sniper ($50K-$150K + Strict Liquidity Floor) active 24/7, baby. 6767.")
+    print("Persistent Sanitized Sniper ($50K-$150K + Disk Memory) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(session),

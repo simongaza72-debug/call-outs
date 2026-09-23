@@ -10,6 +10,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 SUPPORTED_CHAINS = ["solana", "robinhood"]
 DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
+DEXSCREENER_RECENT_PROFILES = "https://api.dexscreener.com/token-profiles/recent-updates/v1"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
@@ -64,11 +65,15 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5) as response:
             if response.status != 200:
-                print(f"Photo send rejected by Telegram, skipping photo to prevent duplicates.")
+                print(f"Photo send rejected by Telegram, skipping photo.")
     except Exception as e:
         print(f"Telegram photo error: {e}")
 
-async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data):
+async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
+    if not (50000 <= market_cap <= 150000):
+        print(f"[-] REJECTED {mint_address[:6]}... MC ${market_cap:,} outside $50K-$150K range.")
+        return False
+
     try:
         if chain_id == "solana":
             async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=5) as res:
@@ -84,15 +89,19 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     
                     if risk_score <= 400 and not is_mintable and not is_freezable and concentrated_supply < 40:
                         return True
+                    else:
+                        print(f"[-] Solana RugCheck failed for {mint_address[:6]}... (Score: {risk_score})")
         elif chain_id == "robinhood":
             lp_info = pair_data.get("liquidity", {})
             if not lp_info or not isinstance(lp_info, dict):
+                print(f"[-] REJECTED Robinhood {mint_address[:6]}... No liquidity info.")
                 return False
             
             raw_usd = lp_info.get("usd", 0)
             lp_usd = float(raw_usd) if raw_usd is not None else 0.0
             
             if lp_usd < 15000:
+                print(f"[-] REJECTED Robinhood {mint_address[:6]}... LP ${lp_usd:,.2f} below $15,000 floor.")
                 return False
                 
             txns = pair_data.get("txns", {}).get("h24", {})
@@ -101,6 +110,8 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
             
             if (buys + sells) >= 30:
                 return True
+            else:
+                print(f"[-] REJECTED Robinhood {mint_address[:6]}... Low transactions count.")
     except Exception as e:
         print(f"Advanced intelligence check error ({chain_id}): {e}")
     return False
@@ -194,14 +205,12 @@ async def process_token_discovery(session, chain, raw_mint):
             p = pairs[0]
             market_cap = p.get("marketCap") or p.get("fdv") or 0
             
-            # STRICT RANGE: $50K to $150K Market Cap
             if 50000 <= market_cap <= 150000:
-                passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p)
+                passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p, market_cap)
                 if passes_intel:
                     image_url = p.get("info", {}).get("imageUrl")
-                    
-                    # 🔴 NO LOGO FIX: Reject tokens if the dev didn't upload a logo to DexScreener
                     if not image_url:
+                        print(f"[-] REJECTED {mint_address[:6]}... No official logo uploaded.")
                         return
                         
                     base_token = p.get("baseToken", {})
@@ -217,8 +226,8 @@ async def process_token_discovery(session, chain, raw_mint):
                         "milestone_sent": False
                     }
                     
-                    # Save state immediately to disk
                     save_persistence(processed_txs, tracked_tokens)
+                    print(f"[+] SUCCESS! Alerting token: {token_name} (${token_symbol}) at MC${market_cap:,}")
                     
                     await send_multichain_telegram_alert(session, {
                         "chain": chain,
@@ -270,22 +279,24 @@ async def monitor_solana_block_zero_stream(session):
             print(f"Solana WS stream error: {e}")
             await asyncio.sleep(5)
 
-async def dexscreener_profiles_loop(session):
+async def dexscreener_dual_feed_loop(session):
     while True:
         try:
-            async with session.get(DEXSCREENER_LATEST_PROFILES, timeout=10) as res:
-                if res.status == 200:
-                    data = await res.json()
-                    profiles = data if isinstance(data, list) else data.get("pairs", [])
-                    for profile in profiles:
-                        chain = profile.get("chainId", "").lower()
-                        if chain in SUPPORTED_CHAINS:
-                            mint_address = profile.get("tokenAddress")
-                            if mint_address:
-                                await process_token_discovery(session, chain, mint_address)
+            endpoints = [DEXSCREENER_LATEST_PROFILES, DEXSCREENER_RECENT_PROFILES]
+            for endpoint in endpoints:
+                async with session.get(endpoint, timeout=10) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        profiles = data if isinstance(data, list) else data.get("pairs", [])
+                        for profile in profiles:
+                            chain = profile.get("chainId", "").lower()
+                            if chain in SUPPORTED_CHAINS:
+                                mint_address = profile.get("tokenAddress")
+                                if mint_address:
+                                    asyncio.create_task(process_token_discovery(session, chain, mint_address))
         except Exception as e:
-            print(f"DexScreener profile fetch error: {e}")
-        await asyncio.sleep(5)
+            print(f"DexScreener dual feed fetch error: {e}")
+        await asyncio.sleep(3)
 
 async def milestone_checker_loop(session):
     while True:
@@ -293,11 +304,11 @@ async def milestone_checker_loop(session):
         await asyncio.sleep(15)
 
 async def run_pro_omnichain_sniper():
-    print("Persistent Sanitized Sniper ($50K-$150K + Disk Memory + Logo Check) active 24/7, baby. 6767.")
+    print("Dual-Feed Sanitized Sniper ($50K-$150K + Zero-Lag Polling) active 24/7, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             monitor_solana_block_zero_stream(session),
-            dexscreener_profiles_loop(session),
+            dexscreener_dual_feed_loop(session),
             milestone_checker_loop(session)
         )
 

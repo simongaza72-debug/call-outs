@@ -7,6 +7,7 @@ TELEGRAM_BOT_TOKEN = "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 TELEGRAM_CHAT_ID = "7113872351"
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# Both chains supported
 SUPPORTED_CHAINS = ["solana", "robinhood"]
 DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_RECENT_PROFILES = "https://api.dexscreener.com/token-profiles/recent-updates/v1"
@@ -20,22 +21,27 @@ def load_persistence():
         try:
             with open(PERSISTENCE_FILE, "r") as f:
                 data = json.load(f)
-                return set(data.get("processed", [])), data.get("tracked", {})
+                return (
+                    set(data.get("processed", [])), 
+                    data.get("tracked", {}),
+                    data.get("incubation", {})
+                )
         except Exception as e:
             print(f"Error loading persistence file: {e}")
-    return set(), {}
+    return set(), {}, {}
 
-def save_persistence(processed_set, tracked_dict):
+def save_persistence(processed_set, tracked_dict, incubation_dict):
     try:
         with open(PERSISTENCE_FILE, "w") as f:
             json.dump({
                 "processed": list(processed_set),
-                "tracked": tracked_dict
+                "tracked": tracked_dict,
+                "incubation": incubation_dict
             }, f)
     except Exception as e:
         print(f"Error saving persistence file: {e}")
 
-processed_txs, tracked_tokens = load_persistence()
+processed_txs, tracked_tokens, incubation_tokens = load_persistence()
 processing_lock = asyncio.Lock()
 
 async def send_telegram_message(session, text, inline_keyboard=None):
@@ -70,9 +76,7 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
         print(f"Telegram photo error: {e}")
 
 async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
-    if not (50000 <= market_cap <= 150000):
-        return False
-
+    # The strict MC filter is removed here so incubation tokens (<50k) can be evaluated
     try:
         if chain_id == "solana":
             async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=8) as res:
@@ -120,7 +124,6 @@ async def send_pro_channel_alert(session, token_data):
     target_mc = token_data["mc"] * 10
     chain_name = token_data["chain"].upper()
     
-    # Pro channel aesthetic layout (cat emojis removed)
     caption = (
         f"🚀 **{token_data['name']} (${token_data['symbol']}) Sweet-Spot Alert!** 🚀\n\n"
         f"🌐 **Network:** {chain_name}\n"
@@ -132,7 +135,6 @@ async def send_pro_channel_alert(session, token_data):
         f"💎 *Elite micro-cap runner engine active. 6767*"
     )
     
-    # Dynamic buttons matching pro channel layout
     row1 = [
         {"text": "📈 Chart", "url": token_data["url"]},
         {"text": "⚡ Buy", "url": token_data["url"]}
@@ -189,7 +191,98 @@ async def check_token_milestones(session):
             print(f"Milestone tracking error: {e}")
             
     if updated:
-        save_persistence(processed_txs, tracked_tokens)
+        save_persistence(processed_txs, tracked_tokens, incubation_tokens)
+
+async def incubation_checker_loop(session):
+    """Constantly checks tokens discovered under $50K to see if they cross into the sweet spot."""
+    while True:
+        if not incubation_tokens:
+            await asyncio.sleep(10)
+            continue
+
+        updated = False
+        for mint_address, data in list(incubation_tokens.items()):
+            try:
+                async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
+                    if res.status == 200:
+                        json_data = await res.json()
+                        pairs = json_data.get("pairs", [])
+                        if pairs:
+                            p = pairs[0]
+                            current_mc = p.get("marketCap") or p.get("fdv") or 0
+                            chain = data["chain"]
+
+                            if 50000 <= current_mc <= 150000:
+                                # Token has graduated from incubation!
+                                base_token = p.get("baseToken", {})
+                                token_name = base_token.get("name", "Unknown")
+                                token_symbol = base_token.get("symbol", "???")
+                                url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
+                                image_url = p.get("info", {}).get("imageUrl")
+                                
+                                info = p.get("info", {})
+                                websites = info.get("websites", [])
+                                socials = info.get("socials", [])
+                                
+                                website_url = websites[0]["url"] if websites else None
+                                telegram_url = None
+                                twitter_url = None
+                                
+                                for s in socials:
+                                    stype = s.get("type", "").lower()
+                                    surl = s.get("url", "")
+                                    if "telegram" in stype or "t.me" in surl:
+                                        telegram_url = surl
+                                    elif "twitter" in stype or "x.com" in surl or "twitter.com" in surl:
+                                        twitter_url = surl
+
+                                txns_h1 = p.get("txns", {}).get("h1", {})
+                                buys = txns_h1.get("buys", 0)
+                                sells = txns_h1.get("sells", 0)
+                                volume = p.get("volume", {}).get("h24", 0)
+
+                                async with processing_lock:
+                                    del incubation_tokens[mint_address]
+                                    processed_txs.add(mint_address)
+                                    tracked_tokens[mint_address] = {
+                                        "chain": chain,
+                                        "initial_mc": current_mc,
+                                        "name": token_name,
+                                        "symbol": token_symbol,
+                                        "milestone_sent": False
+                                    }
+                                updated = True
+                                print(f"[+] INCUBATION GRADUATED: {token_name} at MC${current_mc:,}")
+                                
+                                await send_pro_channel_alert(session, {
+                                    "chain": chain,
+                                    "name": token_name,
+                                    "symbol": token_symbol,
+                                    "address": mint_address,
+                                    "mc": current_mc,
+                                    "volume": volume,
+                                    "buys": buys,
+                                    "sells": sells,
+                                    "url": url,
+                                    "image": image_url,
+                                    "website": website_url,
+                                    "telegram": telegram_url,
+                                    "twitter": twitter_url
+                                })
+                            
+                            elif current_mc > 150000:
+                                # Token pumped too fast or gap-upped, removing from incubation
+                                async with processing_lock:
+                                    del incubation_tokens[mint_address]
+                                    processed_txs.add(mint_address)
+                                updated = True
+            except Exception as e:
+                print(f"Incubation check error for {mint_address}: {e}")
+                
+        if updated:
+            save_persistence(processed_txs, tracked_tokens, incubation_tokens)
+            
+        await asyncio.sleep(10)
 
 async def process_token_discovery(session, chain, raw_mint):
     if not raw_mint:
@@ -198,7 +291,7 @@ async def process_token_discovery(session, chain, raw_mint):
     mint_address = raw_mint.strip().lower()
 
     async with processing_lock:
-        if mint_address in tracked_tokens:
+        if mint_address in tracked_tokens or mint_address in incubation_tokens:
             return
     
     try:
@@ -213,9 +306,6 @@ async def process_token_discovery(session, chain, raw_mint):
             p = pairs[0]
             market_cap = p.get("marketCap") or p.get("fdv") or 0
             
-            # Keep tracking tokens as they climb past $50K, stop checking if past $150K
-            if market_cap < 50000:
-                return
             if market_cap > 150000:
                 async with processing_lock:
                     processed_txs.add(mint_address)
@@ -223,6 +313,16 @@ async def process_token_discovery(session, chain, raw_mint):
             
             passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p, market_cap)
             if passes_intel:
+                
+                # If safe but under $50k, send it to the incubator
+                if market_cap < 50000:
+                    async with processing_lock:
+                        incubation_tokens[mint_address] = {"chain": chain}
+                    save_persistence(processed_txs, tracked_tokens, incubation_tokens)
+                    print(f"[*] Added to Incubation Watchlist: {mint_address} at MC${market_cap:,}")
+                    return
+
+                # If inside the $50k - $150k sweet spot, fire alert immediately
                 image_url = p.get("info", {}).get("imageUrl")
                 if not image_url:
                     return
@@ -232,7 +332,6 @@ async def process_token_discovery(session, chain, raw_mint):
                 token_symbol = base_token.get("symbol", "???")
                 url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
                 
-                # Extract socials & website for pro buttons
                 info = p.get("info", {})
                 websites = info.get("websites", [])
                 socials = info.get("socials", [])
@@ -264,7 +363,7 @@ async def process_token_discovery(session, chain, raw_mint):
                         "milestone_sent": False
                     }
                 
-                save_persistence(processed_txs, tracked_tokens)
+                save_persistence(processed_txs, tracked_tokens, incubation_tokens)
                 print(f"[+] PRO ALERT DISPATCHED: {token_name} (${token_symbol}) at MC${market_cap:,}")
                 
                 await send_pro_channel_alert(session, {
@@ -314,7 +413,8 @@ async def run_pro_omnichain_sniper():
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             dexscreener_dual_feed_loop(session),
-            milestone_checker_loop(session)
+            milestone_checker_loop(session),
+            incubation_checker_loop(session) # New monitor attached here
         )
 
 if __name__ == "__main__":

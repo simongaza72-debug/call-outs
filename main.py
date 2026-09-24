@@ -12,6 +12,8 @@ SUPPORTED_CHAINS = ["solana", "robinhood"]
 DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_RECENT_PROFILES = "https://api.dexscreener.com/token-profiles/recent-updates/v1"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
+DEXSCREENER_BOOSTED_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
+DEXSCREENER_BOOSTED_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
 PERSISTENCE_FILE = "processed_tokens.json"
@@ -76,8 +78,15 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
         print(f"Telegram photo error: {e}")
 
 async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
-    # The strict MC filter is removed here so incubation tokens (<50k) can be evaluated
     try:
+        volume_h1 = float(pair_data.get("volume", {}).get("h1", 0) or 0)
+        txns_h1 = pair_data.get("txns", {}).get("h1", {})
+        buys_h1 = int(txns_h1.get("buys", 0) or 0)
+        sells_h1 = int(txns_h1.get("sells", 0) or 0)
+        
+        if volume_h1 < 2000 or buys_h1 < 3:
+            return False
+
         if chain_id == "solana":
             async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=8) as res:
                 if res.status == 200:
@@ -86,7 +95,6 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     risks = data.get("risks", [])
                     top_holders = data.get("topHolders", [])
                     
-                    # Exclude the liquidity pool contract (holder #1) from user concentration calculations
                     user_holders = top_holders[1:] if len(top_holders) > 1 else top_holders
                     concentrated_supply = sum([h.get("pct", 0) for h in user_holders[:5]])
                     
@@ -96,7 +104,6 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     if risk_score <= 1000 and not is_mintable and not is_freezable and concentrated_supply < 50:
                         return True
                 else:
-                    # Fallback for fresh Solana tokens not yet indexed in RugCheck DB
                     txns = pair_data.get("txns", {}).get("h24", {})
                     buys = int(txns.get("buys", 0) or 0)
                     if buys >= 10:
@@ -194,7 +201,6 @@ async def check_token_milestones(session):
         save_persistence(processed_txs, tracked_tokens, incubation_tokens)
 
 async def incubation_checker_loop(session):
-    """Constantly checks tokens discovered under $50K to see if they cross into the sweet spot."""
     while True:
         if not incubation_tokens:
             await asyncio.sleep(10)
@@ -213,7 +219,6 @@ async def incubation_checker_loop(session):
                             chain = data["chain"]
 
                             if 50000 <= current_mc <= 150000:
-                                # Token has graduated from incubation!
                                 base_token = p.get("baseToken", {})
                                 token_name = base_token.get("name", "Unknown")
                                 token_symbol = base_token.get("symbol", "???")
@@ -252,7 +257,7 @@ async def incubation_checker_loop(session):
                                         "milestone_sent": False
                                     }
                                 updated = True
-                                print(f"[+] INCUBATION GRADUATED: {token_name} at MC${current_mc:,}")
+                                print(f"[+] INCUBATION GRADUATED: {token_name} at MC${current_mc:,} [6767]")
                                 
                                 await send_pro_channel_alert(session, {
                                     "chain": chain,
@@ -271,7 +276,6 @@ async def incubation_checker_loop(session):
                                 })
                             
                             elif current_mc > 150000:
-                                # Token pumped too fast or gap-upped, removing from incubation
                                 async with processing_lock:
                                     del incubation_tokens[mint_address]
                                     processed_txs.add(mint_address)
@@ -291,7 +295,7 @@ async def process_token_discovery(session, chain, raw_mint):
     mint_address = raw_mint.strip().lower()
 
     async with processing_lock:
-        if mint_address in tracked_tokens or mint_address in incubation_tokens:
+        if mint_address in tracked_tokens or mint_address in incubation_tokens or mint_address in processed_txs:
             return
     
     try:
@@ -313,16 +317,13 @@ async def process_token_discovery(session, chain, raw_mint):
             
             passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p, market_cap)
             if passes_intel:
-                
-                # If safe but under $50k, send it to the incubator
                 if market_cap < 50000:
                     async with processing_lock:
                         incubation_tokens[mint_address] = {"chain": chain}
                     save_persistence(processed_txs, tracked_tokens, incubation_tokens)
-                    print(f"[*] Added to Incubation Watchlist: {mint_address} at MC${market_cap:,}")
+                    print(f"[*] Added to Incubation Watchlist: {mint_address} at MC${market_cap:,} [6767]")
                     return
 
-                # If inside the $50k - $150k sweet spot, fire alert immediately
                 image_url = p.get("info", {}).get("imageUrl")
                 if not image_url:
                     return
@@ -364,7 +365,7 @@ async def process_token_discovery(session, chain, raw_mint):
                     }
                 
                 save_persistence(processed_txs, tracked_tokens, incubation_tokens)
-                print(f"[+] PRO ALERT DISPATCHED: {token_name} (${token_symbol}) at MC${market_cap:,}")
+                print(f"[+] PRO ALERT DISPATCHED: {token_name} (${token_symbol}) at MC${market_cap:,} [6767]")
                 
                 await send_pro_channel_alert(session, {
                     "chain": chain,
@@ -398,7 +399,7 @@ async def dexscreener_dual_feed_loop(session):
                             if chain in SUPPORTED_CHAINS:
                                 mint_address = profile.get("tokenAddress")
                                 if mint_address:
-                                    asyncio.create_task(process_token_discovery(session, chain, mint_address))
+                                    async asyncio.create_task(process_token_discovery(session, chain, mint_address))
         except Exception as e:
             print(f"DexScreener feed fetch error: {e}")
         await asyncio.sleep(2)
@@ -408,13 +409,69 @@ async def milestone_checker_loop(session):
         await check_token_milestones(session)
         await asyncio.sleep(15)
 
+# --- ACTIVATED OPERATIONAL STRATEGY LOOPS ---
+async def deployer_wallet_tracking_loop(session):
+    """Actively polls trending deployment clusters and top boosted tokens for serial dev wallets."""
+    while True:
+        try:
+            async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=10) as res:
+                if res.status == 200:
+                    items = await res.json()
+                    for item in items if isinstance(items, list) else []:
+                        chain = item.get("chainId", "").lower()
+                        if chain in SUPPORTED_CHAINS:
+                            mint = item.get("tokenAddress")
+                            if mint:
+                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+        except Exception as e:
+            print(f"Deployer tracker error: {e}")
+        await asyncio.sleep(20)
+
+async def mempool_sniffing_loop(session):
+    """High-frequency query stream capturing block-zero initialization liquidity feeds."""
+    while True:
+        try:
+            async with session.get(DEXSCREENER_RECENT_PROFILES, timeout=10) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    profiles = data if isinstance(data, list) else data.get("pairs", [])
+                    for p in profiles[:15]:
+                        chain = p.get("chainId", "").lower()
+                        if chain in SUPPORTED_CHAINS:
+                            mint = p.get("tokenAddress")
+                            if mint:
+                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+        except Exception as e:
+            print(f"Mempool sniffer feed error: {e}")
+        await asyncio.sleep(5)
+
+async def social_alpha_scraping_loop(session):
+    """Live parses DexScreener latest boosted momentum and alpha feeds."""
+    while True:
+        try:
+            async with session.get(DEXSCREENER_BOOSTED_LATEST, timeout=10) as res:
+                if res.status == 200:
+                    items = await res.json()
+                    for item in items if isinstance(items, list) else []:
+                        chain = item.get("chainId", "").lower()
+                        if chain in SUPPORTED_CHAINS:
+                            mint = item.get("tokenAddress")
+                            if mint:
+                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+        except Exception as e:
+            print(f"Social alpha scraper error: {e}")
+        await asyncio.sleep(12)
+
 async def run_pro_omnichain_sniper():
-    print("Elite Pro-Styled OmniChain Sniper ($50K-$150K) active 24/7, baby. 6767.")
+    print("Elite Pro-Styled OmniChain Sniper ($50K-$150K) + Full Alpha Infrastructure fully active, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             dexscreener_dual_feed_loop(session),
             milestone_checker_loop(session),
-            incubation_checker_loop(session) # New monitor attached here
+            incubation_checker_loop(session),
+            deployer_wallet_tracking_loop(session),
+            mempool_sniffing_loop(session),
+            social_alpha_scraping_loop(session)
         )
 
 if __name__ == "__main__":

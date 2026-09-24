@@ -75,18 +75,27 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
 
     try:
         if chain_id == "solana":
-            async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=5) as res:
+            async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=8) as res:
                 if res.status == 200:
                     data = await res.json()
                     risk_score = data.get("score", 999)
                     risks = data.get("risks", [])
                     top_holders = data.get("topHolders", [])
-                    concentrated_supply = sum([h.get("pct", 0) for h in top_holders[:5]])
                     
-                    is_mintable = any(r.get("name", "").lower().find("mint") != -1 for r in risks)
-                    is_freezable = any(r.get("name", "").lower().find("freeze") != -1 for r in risks)
+                    # Exclude the liquidity pool contract (holder #1) from user concentration calculations
+                    user_holders = top_holders[1:] if len(top_holders) > 1 else top_holders
+                    concentrated_supply = sum([h.get("pct", 0) for h in user_holders[:5]])
                     
-                    if risk_score <= 400 and not is_mintable and not is_freezable and concentrated_supply < 40:
+                    is_mintable = any("mint" in str(r.get("name", "")).lower() for r in risks if r.get("score", 0) > 0)
+                    is_freezable = any("freeze" in str(r.get("name", "")).lower() for r in risks if r.get("score", 0) > 0)
+                    
+                    if risk_score <= 1000 and not is_mintable and not is_freezable and concentrated_supply < 50:
+                        return True
+                else:
+                    # Fallback for fresh Solana tokens not yet indexed in RugCheck DB
+                    txns = pair_data.get("txns", {}).get("h24", {})
+                    buys = int(txns.get("buys", 0) or 0)
+                    if buys >= 10:
                         return True
         elif chain_id == "robinhood":
             lp_info = pair_data.get("liquidity", {})
@@ -101,16 +110,19 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                 return True
     except Exception as e:
         print(f"Advanced intelligence check error ({chain_id}): {e}")
+        if chain_id == "solana":
+            txns = pair_data.get("txns", {}).get("h24", {})
+            if int(txns.get("buys", 0) or 0) >= 10:
+                return True
     return False
 
 async def send_pro_channel_alert(session, token_data):
     target_mc = token_data["mc"] * 10
     chain_name = token_data["chain"].upper()
     
-    # Pro channel aesthetic layout
+    # Pro channel aesthetic layout (cat emojis removed)
     caption = (
         f"🚀 **{token_data['name']} (${token_data['symbol']}) Sweet-Spot Alert!** 🚀\n\n"
-        f"🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱\n"
         f"🌐 **Network:** {chain_name}\n"
         f"🟢 **1H Activity:** {token_data['buys']} Buys | {token_data['sells']} Sells\n"
         f"📊 **24h Volume:** ${token_data['volume']:,.0f}\n"

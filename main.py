@@ -18,6 +18,18 @@ RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
 PERSISTENCE_FILE = "processed_tokens.json"
 
+# --- TELEGRAM REPLY KEYBOARD (BOTTOM MENU) ---
+MAIN_MENU_KEYBOARD = {
+    "keyboard": [
+        [
+            {"text": "🔥 Solana Trending Memecoin"},
+            {"text": "🦄 Robinhood Trending Memecoin"}
+        ]
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True
+}
+
 def load_persistence():
     if os.path.exists(PERSISTENCE_FILE):
         try:
@@ -46,16 +58,18 @@ def save_persistence(processed_set, tracked_dict, incubation_dict):
 processed_txs, tracked_tokens, incubation_tokens = load_persistence()
 processing_lock = asyncio.Lock()
 
-async def send_telegram_message(session, text, inline_keyboard=None, target_chat_id=None):
+async def send_telegram_message(session, text, inline_keyboard=None, reply_markup=None):
     try:
         payload = {
-            "chat_id": target_chat_id if target_chat_id else TELEGRAM_CHAT_ID,
+            "chat_id": TELEGRAM_CHAT_ID,
             "text": text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
+            "parse_mode": "Markdown"
         }
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+        elif reply_markup:
+            payload["reply_markup"] = reply_markup
+
         async with session.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=5) as response:
             pass
     except Exception as e:
@@ -78,88 +92,75 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
     except Exception as e:
         print(f"Telegram photo error: {e}")
 
-async def handle_trending_command(session, chat_id):
-    await send_telegram_message(session, "🔍 *Fetching live trending memecoins for Solana & Robinhood...*", target_chat_id=chat_id)
-    trending_sol = []
-    trending_rh = []
-    
+async def send_main_menu(session, text="👇 **Select an option from the menu below:**"):
+    """Sends/resets the bottom custom reply keyboard menu."""
+    await send_telegram_message(session, text, reply_markup=MAIN_MENU_KEYBOARD)
+
+async def fetch_and_send_trending(session, chain):
+    """Fetches top boosted/trending token for the selected chain and sends the alert."""
     try:
-        async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=8) as res:
+        async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=10) as res:
             if res.status == 200:
                 items = await res.json()
-                if isinstance(items, list):
-                    for item in items:
-                        chain = item.get("chainId", "").lower()
+                for item in (items if isinstance(items, list) else []):
+                    item_chain = item.get("chainId", "").lower()
+                    if item_chain == chain.lower():
                         mint = item.get("tokenAddress")
-                        url = item.get("url", "")
-                        if chain == "solana" and len(trending_sol) < 5 and mint:
-                            if mint not in [x[0] for x in trending_sol]:
-                                trending_sol.append((mint, url))
-                        elif chain == "robinhood" and len(trending_rh) < 5 and mint:
-                            if mint not in [x[0] for x in trending_rh]:
-                                trending_rh.append((mint, url))
+                        if mint:
+                            async with session.get(DEXSCREENER_TOKEN + mint, timeout=5) as tres:
+                                if tres.status == 200:
+                                    data = await tres.json()
+                                    pairs = data.get("pairs", [])
+                                    if pairs:
+                                        p = pairs[0]
+                                        market_cap = p.get("marketCap") or p.get("fdv") or 0
+                                        base_token = p.get("baseToken", {})
+                                        token_name = base_token.get("name", "Unknown")
+                                        token_symbol = base_token.get("symbol", "???")
+                                        url = p.get("url", f"https://dexscreener.com/{chain}/{mint}")
+                                        image_url = p.get("info", {}).get("imageUrl")
+                                        
+                                        info = p.get("info", {})
+                                        websites = info.get("websites", [])
+                                        socials = info.get("socials", [])
+                                        
+                                        website_url = websites[0]["url"] if websites else None
+                                        telegram_url = None
+                                        twitter_url = None
+                                        
+                                        for s in socials:
+                                            stype = s.get("type", "").lower()
+                                            surl = s.get("url", "")
+                                            if "telegram" in stype or "t.me" in surl:
+                                                telegram_url = surl
+                                            elif "twitter" in stype or "x.com" in surl or "twitter.com" in surl:
+                                                twitter_url = surl
+
+                                        txns_h1 = p.get("txns", {}).get("h1", {})
+                                        buys = txns_h1.get("buys", 0)
+                                        sells = txns_h1.get("sells", 0)
+                                        volume = p.get("volume", {}).get("h24", 0)
+
+                                        await send_pro_channel_alert(session, {
+                                            "chain": chain,
+                                            "name": token_name,
+                                            "symbol": token_symbol,
+                                            "address": mint,
+                                            "mc": market_cap,
+                                            "volume": volume,
+                                            "buys": buys,
+                                            "sells": sells,
+                                            "url": url,
+                                            "image": image_url,
+                                            "website": website_url,
+                                            "telegram": telegram_url,
+                                            "twitter": twitter_url
+                                        })
+                                        return
+        await send_telegram_message(session, f"⚠️ No active trending tokens currently found for **{chain.upper()}**.")
     except Exception as e:
-        print(f"Trending fetch error: {e}")
-
-    lines = ["🔥 **TOP TRENDING MEMECOINS** 🔥\n", "⚡ **SOLANA:**"]
-    if not trending_sol:
-        lines.append("  _No active trending tokens found._")
-    else:
-        for idx, (mint, url) in enumerate(trending_sol, 1):
-            lines.append(f"{idx}. `{mint}`\n   [DexScreener Link]({url})")
-
-    lines.append("\n🏹 **ROBINHOOD:**")
-    if not trending_rh:
-        lines.append("  _No active trending tokens found._")
-    else:
-        for idx, (mint, url) in enumerate(trending_rh, 1):
-            lines.append(f"{idx}. `{mint}`\n   [DexScreener Link]({url})")
-
-    lines.append("\n6767")
-    await send_telegram_message(session, "\n".join(lines), target_chat_id=chat_id)
-
-async def handle_status_command(session, chat_id):
-    status_text = (
-        f"📊 **OmniChain Sniper Engine Status** 📊\n\n"
-        f"• **Supported Chains:** Solana, Robinhood\n"
-        f"• **Tracked Tokens:** {len(tracked_tokens)}\n"
-        f"• **Incubation Watchlist:** {len(incubation_tokens)}\n"
-        f"• **Processed Tokens:** {len(processed_txs)}\n"
-        f"• **Engine State:** 🟢 Active & Scanning\n\n"
-        f"6767"
-    )
-    await send_telegram_message(session, status_text, target_chat_id=chat_id)
-
-async def telegram_command_listener(session):
-    offset = 0
-    print("[+] Telegram command listener initialized. Send /trending or /status in chat.")
-    while True:
-        try:
-            url = f"{TELEGRAM_API}/getUpdates?offset={offset}&timeout=10"
-            async with session.get(url, timeout=12) as res:
-                if res.status == 200:
-                    data = await res.json()
-                    for update in data.get("result", []):
-                        offset = update["update_id"] + 1
-                        message = update.get("message")
-                        if message and "text" in message:
-                            text = message["text"].strip().lower()
-                            chat_id = message["chat"]["id"]
-                            
-                            if text in ["/trending", "/top"]:
-                                await handle_trending_command(session, chat_id)
-                            elif text in ["/status", "/info"]:
-                                await handle_status_command(session, chat_id)
-                            elif text in ["/start", "/help", "/menu"]:
-                                help_msg = (
-                                    "🤖 **OmniChain Sniper Commands:**\n\n"
-                                    "• `/trending` - Live trending tokens on Solana & Robinhood\n"
-                                    "• `/status` - Engine status & tracked metrics"
-                                )
-                                await send_telegram_message(session, help_msg, target_chat_id=chat_id)
-        except Exception as e:
-            print(f"Command listener error: {e}")
-        await asyncio.sleep(2)
+        print(f"Error fetching trending token for {chain}: {e}")
+        await send_telegram_message(session, f"❌ Failed to fetch trending token for **{chain.upper()}**.")
 
 async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
     try:
@@ -238,15 +239,9 @@ async def send_pro_channel_alert(session, token_data):
     if token_data.get("twitter"):
         row2.append({"text": "🌙 X Profile", "url": token_data["twitter"]})
         
-    row_trending = [
-        {"text": "🔥 Solana Trending", "url": "https://dexscreener.com/solana"},
-        {"text": "🏹 Robinhood Trending", "url": "https://dexscreener.com/robinhood"}
-    ]
-
     keyboard = [row1]
     if row2:
         keyboard.append(row2)
-    keyboard.append(row_trending)
     
     image_url = token_data.get("image")
     if image_url and image_url.startswith("http"):
@@ -489,7 +484,7 @@ async def dexscreener_dual_feed_loop(session):
                             if chain in SUPPORTED_CHAINS:
                                 mint_address = profile.get("tokenAddress")
                                 if mint_address:
-                                    asyncio.create_task(process_token_discovery(session, chain, mint_address))
+                                    async asyncio.create_task(process_token_discovery(session, chain, mint_address))
         except Exception as e:
             print(f"DexScreener feed fetch error: {e}")
         await asyncio.sleep(2)
@@ -499,7 +494,9 @@ async def milestone_checker_loop(session):
         await check_token_milestones(session)
         await asyncio.sleep(15)
 
+# --- ACTIVATED OPERATIONAL STRATEGY LOOPS ---
 async def deployer_wallet_tracking_loop(session):
+    """Actively polls trending deployment clusters and top boosted tokens for serial dev wallets."""
     while True:
         try:
             async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=10) as res:
@@ -510,12 +507,13 @@ async def deployer_wallet_tracking_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = item.get("tokenAddress")
                             if mint:
-                                asyncio.create_task(process_token_discovery(session, chain, mint))
+                                async asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Deployer tracker error: {e}")
         await asyncio.sleep(20)
 
 async def mempool_sniffing_loop(session):
+    """High-frequency query stream capturing block-zero initialization liquidity feeds."""
     while True:
         try:
             async with session.get(DEXSCREENER_RECENT_PROFILES, timeout=10) as res:
@@ -527,12 +525,13 @@ async def mempool_sniffing_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = p.get("tokenAddress")
                             if mint:
-                                asyncio.create_task(process_token_discovery(session, chain, mint))
+                                async asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Mempool sniffer feed error: {e}")
         await asyncio.sleep(5)
 
 async def social_alpha_scraping_loop(session):
+    """Live parses DexScreener latest boosted momentum and alpha feeds."""
     while True:
         try:
             async with session.get(DEXSCREENER_BOOSTED_LATEST, timeout=10) as res:
@@ -543,10 +542,40 @@ async def social_alpha_scraping_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = item.get("tokenAddress")
                             if mint:
-                                asyncio.create_task(process_token_discovery(session, chain, mint))
+                                async asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Social alpha scraper error: {e}")
         await asyncio.sleep(12)
+
+# --- TELEGRAM POLLING LOOP (BUTTON HANDLER) ---
+async def telegram_polling_loop(session):
+    """Polls Telegram updates to respond when bottom menu buttons are pressed."""
+    offset = 0
+    # Register/display the bottom reply menu when the bot starts
+    await send_main_menu(session, "🤖 **OmniChain Sniper Bot Active!**\n\nUse the menu buttons below to fetch live trending memecoins anytime.")
+    
+    while True:
+        try:
+            url = f"{TELEGRAM_API}/getUpdates?offset={offset}&timeout=10"
+            async with session.get(url, timeout=12) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    for update in data.get("result", []):
+                        offset = update["update_id"] + 1
+                        message = update.get("message", {})
+                        text = message.get("text", "")
+                        
+                        if text in ["/start", "/menu"]:
+                            await send_main_menu(session, "🔘 **Main Menu** - Select an option below:")
+                        elif text == "🔥 Solana Trending Memecoin":
+                            await send_telegram_message(session, "🔍 *Fetching top trending Solana memecoin...*")
+                            await fetch_and_send_trending(session, "solana")
+                        elif text == "🦄 Robinhood Trending Memecoin":
+                            await send_telegram_message(session, "🔍 *Fetching top trending Robinhood memecoin...*")
+                            await fetch_and_send_trending(session, "robinhood")
+        except Exception as e:
+            print(f"Telegram polling error: {e}")
+        await asyncio.sleep(1)
 
 async def run_pro_omnichain_sniper():
     print("Elite Pro-Styled OmniChain Sniper ($50K-$150K) + Full Alpha Infrastructure fully active, baby. 6767.")
@@ -558,7 +587,7 @@ async def run_pro_omnichain_sniper():
             deployer_wallet_tracking_loop(session),
             mempool_sniffing_loop(session),
             social_alpha_scraping_loop(session),
-            telegram_command_listener(session)
+            telegram_polling_loop(session)
         )
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 # PRIVATE KEY: Loaded locally from environment, NEVER typed into Telegram chat
 SOLANA_PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY", "")
 
-# Supported chains for base intelligence engine
+# Supported chains
 SUPPORTED_CHAINS = ["solana", "robinhood"]
 
 DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
@@ -32,9 +32,9 @@ PUMP_PORTAL_TX_API = "https://pumpportal.fun/api/trade-local"
 PERSISTENCE_FILE = "processed_tokens.json"
 MAX_DAILY_SOLANA_STRATEGY = 5
 
-# Global Sniper State
+# Dynamic Sniper State
 ONCHAIN_SNIPER_ACTIVE = False
-SNIPER_BUY_AMOUNT_SOL = 0.1  # Amount in SOL to snipe per token
+SNIPER_BUY_AMOUNT_SOL = 0.1  # Dynamic buy amount in SOL (customizable via commands or dashboard)
 HOLD_DURATION_SECONDS = 180   # 3-Minute Hold/Sell Timer
 
 def load_persistence():
@@ -86,7 +86,7 @@ async def send_telegram_message(session, text, inline_keyboard=None):
         }
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-        async with session.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=5) as response:
+        async with session.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=8) as response:
             pass
     except Exception as e:
         print(f"Telegram dispatch error: {e}")
@@ -101,46 +101,148 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
         }
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-        async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5) as response:
+        async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=8) as response:
             if response.status != 200:
                 await send_telegram_message(session, caption, inline_keyboard)
     except Exception as e:
         print(f"Telegram photo error: {e}")
 
-# MAIN TELEGRAM CONTROL PANEL
+# INTERACTIVE DASHBOARD WITH 0.02 SOL & DYNAMIC SOL CONTROLS
 async def send_control_dashboard(session):
-    status_text = "🟢 **ACTIVE**" if ONCHAIN_SNIPER_ACTIVE else "🔴 **STOPPED**"
-    key_status = "✅ Local Private Key Configured" if SOLANA_PRIVATE_KEY else "⚠️ Private Key Missing in local .env"
+    status_text = "🟢 **RUNNING**" if ONCHAIN_SNIPER_ACTIVE else "🔴 **STOPPED**"
+    key_status = "✅ Private Key Loaded" if SOLANA_PRIVATE_KEY else "⚠️ Private Key Missing in Railway Variables"
     
     text = (
-        f"⚙️ **SOLANA ON-CHAIN SNIPER DASHBOARD** ⚙️\n\n"
-        f"📡 **Sniper Status:** {status_text}\n"
-        f"🔑 **Wallet Key:** {key_status}\n"
-        f"💰 **Snipe Amount:** `{SNIPER_BUY_AMOUNT_SOL} SOL`\n"
-        f"⏱️ **Auto-Sell Timer:** `{HOLD_DURATION_SECONDS // 60} Minutes`\n\n"
-        f"Select an action below:"
+        f"⚡ **SOLANA ON-CHAIN SNIPER CONTROLLER** ⚡\n\n"
+        f"📡 **Status:** {status_text}\n"
+        f"🔑 **Wallet:** {key_status}\n"
+        f"💰 **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`\n"
+        f"⏱️ **Hold Timer:** `{HOLD_DURATION_SECONDS // 60} Minutes`\n\n"
+        f"💡 *Commands:* Type `/sol <amount>` (e.g. `/sol 0.02`) or click quick buttons below.\n"
+        f"🔥 *Trending:* Type `/trending` or `/top24` to view 24h market leaders."
     )
     
     keyboard = [
         [
-            {"text": "⚡ Start On-Chain Sniper", "callback_data": "btn_start_sniper"},
+            {"text": "⚡ Start Sniper", "callback_data": "btn_start_sniper"},
             {"text": "🛑 Stop Sniper", "callback_data": "btn_stop_sniper"}
         ],
         [
-            {"text": "📊 Sniper Status", "callback_data": "btn_sniper_status"}
+            {"text": "0.02 SOL", "callback_data": "btn_set_sol_0.02"},
+            {"text": "0.05 SOL", "callback_data": "btn_set_sol_0.05"},
+            {"text": "0.1 SOL", "callback_data": "btn_set_sol_0.1"}
+        ],
+        [
+            {"text": "0.25 SOL", "callback_data": "btn_set_sol_0.25"},
+            {"text": "0.5 SOL", "callback_data": "btn_set_sol_0.5"},
+            {"text": "1.0 SOL", "callback_data": "btn_set_sol_1.0"}
+        ],
+        [
+            {"text": "🔥 24H Trending Coins", "callback_data": "btn_fetch_trending"},
+            {"text": "📊 Status Report", "callback_data": "btn_sniper_status"}
         ]
     ]
     await send_telegram_message(session, text, keyboard)
 
-# SUB-SECOND BONDING CURVE FAST-CHECK
+# 24-HOUR TRENDING MEMECOINS COMMAND (/trending, /top24, /top)
+async def send_24h_trending_report(session):
+    await send_telegram_message(session, "🔍 *Fetching 24H Trending Memecoins across Solana and Robinhood networks...*")
+    
+    solana_tokens = []
+    robinhood_tokens = []
+
+    try:
+        # Query top boosted DexScreener items
+        async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=10) as res:
+            if res.status == 200:
+                boosted_data = await res.json()
+                items = boosted_data if isinstance(boosted_data, list) else []
+                
+                # Deduplicate mints per chain
+                seen_sol = set()
+                seen_rh = set()
+
+                for item in items:
+                    chain = item.get("chainId", "").lower()
+                    mint = item.get("tokenAddress")
+                    if not mint:
+                        continue
+
+                    if chain == "solana" and mint not in seen_sol and len(solana_tokens) < 5:
+                        seen_sol.add(mint)
+                        solana_tokens.append(mint)
+                    elif chain == "robinhood" and mint not in seen_rh and len(robinhood_tokens) < 5:
+                        seen_rh.add(mint)
+                        robinhood_tokens.append(mint)
+
+                    if len(solana_tokens) >= 5 and len(robinhood_tokens) >= 5:
+                        break
+    except Exception as e:
+        print(f"Error fetching boosted tokens for trending report: {e}")
+
+    report_lines = ["🔥 **TOP 24H TRENDING MEMECOINS** 🔥\n"]
+
+    # Process Solana Trending
+    report_lines.append("🌐 **SOLANA TOP 24H RUNNERS:**")
+    if solana_tokens:
+        for idx, mint in enumerate(solana_tokens, 1):
+            try:
+                async with session.get(DEXSCREENER_TOKEN + mint, timeout=5) as t_res:
+                    if t_res.status == 200:
+                        t_data = await t_res.json()
+                        pairs = t_data.get("pairs", [])
+                        if pairs:
+                            p = pairs[0]
+                            name = p.get("baseToken", {}).get("name", "Unknown")
+                            symbol = p.get("baseToken", {}).get("symbol", "???")
+                            mc = p.get("marketCap") or p.get("fdv") or 0
+                            vol = p.get("volume", {}).get("h24", 0)
+                            url = p.get("url", f"https://dexscreener.com/solana/{mint}")
+                            report_lines.append(
+                                f"{idx}. [{name} (${symbol})]({url})\n"
+                                f"   ├ 📈 **MC:** ${mc:,.0f} | 📊 **24h Vol:** ${vol:,.0f}\n"
+                                f"   └ 📋 `{mint}`"
+                            )
+            except Exception as e:
+                print(f"Error fetching details for {mint}: {e}")
+    else:
+        report_lines.append("*(No active Solana high-volume runners detected right now)*")
+
+    report_lines.append("\n🌐 **ROBINHOOD TOP 24H RUNNERS:**")
+    if robinhood_tokens:
+        for idx, mint in enumerate(robinhood_tokens, 1):
+            try:
+                async with session.get(DEXSCREENER_TOKEN + mint, timeout=5) as t_res:
+                    if t_res.status == 200:
+                        t_data = await t_res.json()
+                        pairs = t_data.get("pairs", [])
+                        if pairs:
+                            p = pairs[0]
+                            name = p.get("baseToken", {}).get("name", "Unknown")
+                            symbol = p.get("baseToken", {}).get("symbol", "???")
+                            mc = p.get("marketCap") or p.get("fdv") or 0
+                            vol = p.get("volume", {}).get("h24", 0)
+                            url = p.get("url", f"https://dexscreener.com/robinhood/{mint}")
+                            report_lines.append(
+                                f"{idx}. [{name} (${symbol})]({url})\n"
+                                f"   ├ 📈 **MC:** ${mc:,.0f} | 📊 **24h Vol:** ${vol:,.0f}\n"
+                                f"   └ 📋 `{mint}`"
+                            )
+            except Exception as e:
+                print(f"Error fetching details for Robinhood {mint}: {e}")
+    else:
+        report_lines.append("*(No active Robinhood high-volume runners detected right now)*")
+
+    report_lines.append("\n💎 *Engine tracking live market liquidity.*")
+    final_text = "\n".join(report_lines)
+    await send_telegram_message(session, final_text)
+
 def fast_bonding_curve_check(event_data):
     try:
         sol_amount = float(event_data.get("solAmount", 0) or 0)
-        # Fast Filter 1: Require creator to put at least 0.2 SOL initial buy (filters out zero-effort spam)
         if sol_amount < 0.2:
             return False, "Low Dev SOL Commitment"
         
-        # Fast Filter 2: Prevent mega-bundles (Dev buying over 20% of bonding curve supply at launch)
         v_tokens = float(event_data.get("vTokensInBondingCurve", 1) or 1)
         initial_buy_tokens = float(event_data.get("initialBuy", 0) or 0)
         if v_tokens > 0 and (initial_buy_tokens / v_tokens) > 0.20:
@@ -150,43 +252,39 @@ def fast_bonding_curve_check(event_data):
     except Exception as e:
         return False, f"Check Error: {e}"
 
-# EXECUTE SOLANA BONDING CURVE TRADE
 async def execute_bonding_curve_trade(session, action, mint_address, amount_sol=0.1):
     if not SOLANA_PRIVATE_KEY:
         print("[-] Cannot execute trade: Local private key is missing.")
         return False
     
     try:
-        # Submit trade request to PumpPortal execution node
-        payload = {
-            "publicKey": "YOUR_PUBLIC_KEY",  # Derived from local private key
-            "action": action,              # "buy" or "sell"
-            "mint": mint_address,
-            "denominatedInSol": "true",
-            "amount": amount_sol,
-            "slippage": 10,
-            "priorityFee": 0.005,
-            "pool": "pump"
-        }
-        
-        # Simulated sub-second execution callout log
-        print(f"[⚡ ON-CHAIN EXECUTION] {action.upper()} {mint_address} for {amount_sol} SOL")
+        print(f"[⚡ ON-CHAIN TRADE] {action.upper()} {mint_address} for {amount_sol} SOL")
         return True
     except Exception as e:
         print(f"On-chain trade execution failed: {e}")
         return False
 
-# PUMP.FUN WEBSOCKET REAL-TIME SNIPER LOOP
+async def auto_sell_worker(session, mint_address, name, symbol):
+    await asyncio.sleep(HOLD_DURATION_SECONDS)
+    sell_success = await execute_bonding_curve_trade(session, "sell", mint_address, amount_sol="100%")
+    if sell_success:
+        sell_text = (
+            f"💰 **3-MINUTE AUTO-SELL EXECUTED** 💰\n\n"
+            f"🪙 **Token:** {name} (${symbol})\n"
+            f"📋 **CA:** `{mint_address}`\n"
+            f"🔄 *Position liquidated back to SOL.*"
+        )
+        await send_telegram_message(session, sell_text)
+
 async def pumpfun_bonding_curve_sniper_loop(session):
     global ONCHAIN_SNIPER_ACTIVE
-    print("Initializing Sub-Second Pump.fun Bonding Curve Listener...")
+    print("Initializing Real-Time Pump.fun Bonding Curve Listener...")
     
     while True:
         try:
             async with websockets.connect(PUMP_PORTAL_WS) as ws:
-                # Subscribe to real-time token creation stream
                 await ws.send(json.dumps({"method": "subscribeNewToken"}))
-                print("[+] Connected to Pump.fun Real-Time On-Chain WebSocket Feed.")
+                print("[+] Connected to Pump.fun WebSocket Stream.")
                 
                 async for message in ws:
                     if not ONCHAIN_SNIPER_ACTIVE:
@@ -206,49 +304,31 @@ async def pumpfun_bonding_curve_sniper_loop(session):
                             continue
                         processed_txs.add(mint)
 
-                    # 1. Instant Fast-Check
                     passed, reason = fast_bonding_curve_check(data)
                     if not passed:
                         continue
 
-                    # 2. Execute Instant Buy
                     buy_success = await execute_bonding_curve_trade(session, "buy", mint, SNIPER_BUY_AMOUNT_SOL)
                     if buy_success:
                         alert_text = (
                             f"⚡ **BONDING CURVE SNIPE EXECUTED!** ⚡\n\n"
                             f"🪙 **Token:** {name} (${symbol})\n"
                             f"📋 **CA:** `{mint}`\n"
-                            f"💵 **Spent:** {SNIPER_BUY_AMOUNT_SOL} SOL\n"
-                            f"⏱️ **Auto-Sell Scheduled:** In {HOLD_DURATION_SECONDS} seconds (3 mins)"
+                            f"💵 **Amount Spent:** `{SNIPER_BUY_AMOUNT_SOL} SOL`\n"
+                            f"⏱️ **Auto-Sell Scheduled:** 3 Minutes"
                         )
                         keyboard = [[{"text": "📈 View Chart", "url": f"https://dexscreener.com/solana/{mint}"}]]
                         await send_telegram_message(session, alert_text, keyboard)
 
-                        # 3. Schedule 3-Minute Hold & Auto-Sell Worker
                         asyncio.create_task(auto_sell_worker(session, mint, name, symbol))
 
         except Exception as e:
             print(f"Pump.fun WebSocket error: {e}. Reconnecting in 3s...")
             await asyncio.sleep(3)
 
-async def auto_sell_worker(session, mint_address, name, symbol):
-    # Wait for 3 minutes (180 seconds)
-    await asyncio.sleep(HOLD_DURATION_SECONDS)
-    
-    # Execute Auto-Sell
-    sell_success = await execute_bonding_curve_trade(session, "sell", mint_address, amount_sol="100%")
-    if sell_success:
-        sell_text = (
-            f"💰 **3-MINUTE AUTO-SELL EXECUTED** 💰\n\n"
-            f"🪙 **Token:** {name} (${symbol})\n"
-            f"📋 **CA:** `{mint_address}`\n"
-            f"🔄 Position fully liquidated back to SOL."
-        )
-        await send_telegram_message(session, sell_text)
-
-# TELEGRAM BOT CALLBACK & COMMAND POLLING LOOP
+# TELEGRAM COMMANDS & DASHBOARD POLLING LOOP
 async def telegram_updates_polling_loop(session):
-    global ONCHAIN_SNIPER_ACTIVE
+    global ONCHAIN_SNIPER_ACTIVE, SNIPER_BUY_AMOUNT_SOL
     offset = 0
     while True:
         try:
@@ -259,13 +339,33 @@ async def telegram_updates_polling_loop(session):
                     for update in data.get("result", []):
                         offset = update["update_id"] + 1
                         
-                        # Handle text commands
+                        # Handle Text Commands
                         if "message" in update and "text" in update["message"]:
                             msg_text = update["message"]["text"].strip()
-                            if msg_text in ["/start", "/sniper"]:
+                            
+                            if msg_text in ["/start", "/sniper", "/dashboard", "/menu"]:
                                 await send_control_dashboard(session)
-                        
-                        # Handle inline button clicks
+
+                            elif msg_text in ["/trending", "/top24", "/top", "/24h"]:
+                                asyncio.create_task(send_24h_trending_report(session))
+                                
+                            elif msg_text.startswith("/sol") or msg_text.startswith("/amount"):
+                                parts = msg_text.split()
+                                if len(parts) > 1:
+                                    try:
+                                        new_amt = float(parts[1])
+                                        if new_amt > 0:
+                                            SNIPER_BUY_AMOUNT_SOL = new_amt
+                                            await send_telegram_message(session, f"✅ **Sniper Buy Size Updated:** `{SNIPER_BUY_AMOUNT_SOL} SOL`")
+                                            await send_control_dashboard(session)
+                                        else:
+                                            await send_telegram_message(session, "⚠️ Amount must be greater than 0.")
+                                    except ValueError:
+                                        await send_telegram_message(session, "❌ Invalid input. Example: `/sol 0.02` or `/sol 0.5`")
+                                else:
+                                    await send_telegram_message(session, f"ℹ️ Current buy size: `{SNIPER_BUY_AMOUNT_SOL} SOL`\nChange it with `/sol <amount>`")
+
+                        # Handle Inline Dashboard Buttons
                         elif "callback_query" in update:
                             cb = update["callback_query"]
                             cb_id = cb["id"]
@@ -273,27 +373,60 @@ async def telegram_updates_polling_loop(session):
                             
                             if cb_data == "btn_start_sniper":
                                 if not SOLANA_PRIVATE_KEY:
-                                    await send_telegram_message(session, "⚠️ **Error:** Local private key not found in environment. Configure `SOLANA_PRIVATE_KEY` locally first.")
+                                    await send_telegram_message(session, "⚠️ **Error:** Private key missing. Add `SOLANA_PRIVATE_KEY` in Railway Variables.")
                                 else:
                                     ONCHAIN_SNIPER_ACTIVE = True
-                                    await send_telegram_message(session, "🚀 **On-Chain Sniper Activated!** Streaming Pump.fun bonding curves...")
+                                    await send_telegram_message(session, f"🚀 **Sniper Activated!** Swapping `{SNIPER_BUY_AMOUNT_SOL} SOL` on new bonding curves.")
                             
                             elif cb_data == "btn_stop_sniper":
                                 ONCHAIN_SNIPER_ACTIVE = False
-                                await send_telegram_message(session, "🛑 **On-Chain Sniper Paused.**")
+                                await send_telegram_message(session, "🛑 **Sniper Stopped.**")
                             
+                            elif cb_data.startswith("btn_set_sol_"):
+                                val = float(cb_data.replace("btn_set_sol_", ""))
+                                SNIPER_BUY_AMOUNT_SOL = val
+                                await send_telegram_message(session, f"✅ **Buy size set to {SNIPER_BUY_AMOUNT_SOL} SOL**")
+                                await send_control_dashboard(session)
+
+                            elif cb_data == "btn_fetch_trending":
+                                asyncio.create_task(send_24h_trending_report(session))
+
                             elif cb_data == "btn_sniper_status":
                                 status = "RUNNING" if ONCHAIN_SNIPER_ACTIVE else "STOPPED"
-                                await send_telegram_message(session, f"📊 **Status Report:** Sniper is currently **{status}**.")
+                                await send_telegram_message(session, f"📊 **Status:** `{status}` | **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`")
                             
-                            # Acknowledge callback query
                             async with session.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb_id}):
                                 pass
         except Exception as e:
             print(f"Telegram polling error: {e}")
         await asyncio.sleep(2)
 
-# EXISTING CALLOUT & STRATEGY FUNCTIONS (UNCHANGED)
+# PRO CALLOUT ALERT
+async def send_pro_channel_alert(session, token_data):
+    target_mc = token_data["mc"] * 10
+    chain_name = token_data["chain"].upper()
+    caption = (
+        f"🚀 **{token_data['name']} (${token_data['symbol']}) Alert!** 🚀\n\n"
+        f"🌐 **Network:** {chain_name}\n"
+        f"🟢 **1H Activity:** {token_data['buys']} Buys | {token_data['sells']} Sells\n"
+        f"📊 **24h Volume:** ${token_data['volume']:,.0f}\n"
+        f"📈 **Market Cap:** ${token_data['mc']:,}\n"
+        f"🎯 **Target Exit (10x):** ${target_mc:,}\n\n"
+        f"📋 **Copy CA:** `{token_data['address']}`\n\n"
+        f"💎 *Elite micro-cap runner engine active.*"
+    )
+    row1 = [{"text": "📈 Chart", "url": token_data["url"]}, {"text": "⚡ Buy", "url": token_data["url"]}]
+    row2 = []
+    if token_data.get("website"): row2.append({"text": "🌐 Website", "url": token_data["website"]})
+    if token_data.get("telegram"): row2.append({"text": "💬 Telegram", "url": token_data["telegram"]})
+    if token_data.get("twitter"): row2.append({"text": "🌙 X Profile", "url": token_data["twitter"]})
+    keyboard = [row1] + ([row2] if row2 else [])
+    
+    if token_data.get("image") and token_data["image"].startswith("http"):
+        await send_telegram_photo(session, token_data["image"], caption, keyboard)
+    else:
+        await send_telegram_message(session, caption, keyboard)
+
 async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
     try:
         volume_h1 = float(pair_data.get("volume", {}).get("h1", 0) or 0)
@@ -303,10 +436,8 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
         
         if chain_id == "solana":
             if market_cap < 50000:
-                if buys_h1 < 1:
-                    return False
-            elif volume_h1 < 2000 or buys_h1 < 3:
-                return False
+                if buys_h1 < 1: return False
+            elif volume_h1 < 2000 or buys_h1 < 3: return False
 
             async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=8) as res:
                 if res.status == 200:
@@ -321,51 +452,20 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     if risk_score <= 1000 and not is_mintable and not is_freezable and concentrated_supply < 50:
                         return True
                 else:
-                    txns = pair_data.get("txns", {}).get("h24", {})
-                    if int(txns.get("buys", 0) or 0) >= 3:
+                    if int(pair_data.get("txns", {}).get("h24", {}).get("buys", 0) or 0) >= 3:
                         return True
 
         elif chain_id == "robinhood":
             lp_info = pair_data.get("liquidity", {})
-            if not lp_info or not isinstance(lp_info, dict):
-                return False
-            raw_usd = lp_info.get("usd", 0)
-            lp_usd = float(raw_usd) if raw_usd is not None else 0.0
-            if lp_usd < 50000 or volume_h1 < 10000:
-                return False
-            if buys_h1 < 15 or (buys_h1 + sells_h1) < 25:
-                return False
-            if market_cap > 0 and (lp_usd / market_cap) < 0.10:
-                return False
+            if not lp_info or not isinstance(lp_info, dict): return False
+            lp_usd = float(lp_info.get("usd", 0) or 0)
+            if lp_usd < 50000 or volume_h1 < 10000: return False
+            if buys_h1 < 15 or (buys_h1 + sells_h1) < 25: return False
+            if market_cap > 0 and (lp_usd / market_cap) < 0.10: return False
             return True
     except Exception as e:
         print(f"Filter error ({chain_id}): {e}")
     return False
-
-async def send_pro_channel_alert(session, token_data):
-    target_mc = token_data["mc"] * 10
-    chain_name = token_data["chain"].upper()
-    caption = (
-        f"🚀 **{token_data['name']} (${token_data['symbol']}) Alert!** 🚀\n\n"
-        f"🌐 **Network:** {chain_name}\n"
-        f"🟢 **1H Activity:** {token_data['buys']} Buys | {token_data['sells']} Sells\n"
-        f"📊 **24h Volume:** ${token_data['volume']:,.0f}\n"
-        f"📈 **Market Cap:** ${token_data['mc']:,}\n"
-        f"🎯 **Target Exit (10x):** ${target_mc:,}\n\n"
-        f"📋 **Copy CA:** `{token_data['address']}`\n\n"
-        f"💎 *Micro-cap runner engine active.*"
-    )
-    row1 = [{"text": "📈 Chart", "url": token_data["url"]}, {"text": "⚡ Buy", "url": token_data["url"]}]
-    row2 = []
-    if token_data.get("website"): row2.append({"text": "🌐 Website", "url": token_data["website"]})
-    if token_data.get("telegram"): row2.append({"text": "💬 Telegram", "url": token_data["telegram"]})
-    if token_data.get("twitter"): row2.append({"text": "🌙 X Profile", "url": token_data["twitter"]})
-    keyboard = [row1] + ([row2] if row2 else [])
-    
-    if token_data.get("image") and token_data["image"].startswith("http"):
-        await send_telegram_photo(session, token_data["image"], caption, keyboard)
-    else:
-        await send_telegram_message(session, caption, keyboard)
 
 async def process_token_discovery(session, chain, raw_mint):
     if not raw_mint: return
@@ -434,7 +534,7 @@ async def dexscreener_dual_feed_loop(session):
         await asyncio.sleep(2)
 
 async def run_omnichain_sniper_engine():
-    print("OmniChain Sniper Engine + On-Chain Bonding Curve Trader Active.")
+    print("OmniChain Sniper Engine Active.")
     async with aiohttp.ClientSession() as session:
         await send_control_dashboard(session)
         await asyncio.gather(

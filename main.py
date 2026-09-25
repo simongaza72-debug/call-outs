@@ -137,18 +137,16 @@ async def broadcast_telegram_photo(session, photo_url, caption, inline_keyboard=
 async def send_persistent_chat_menu(session, chat_id):
     menu_keyboard = [
         [{"text": "⚡ Sniper Dashboard"}],
-        [{"text": "0.02 SOL"}, {"text": "0.05 SOL"}, {"text": "0.1 SOL"}],
-        [{"text": "0.25 SOL"}, {"text": "0.5 SOL"}, {"text": "1.0 SOL"}],
         [{"text": "🔥 24H Trending Coins"}, {"text": "📊 Status Report"}]
     ]
     await send_telegram_message(
         session, 
         chat_id,
-        "📱 **Main Menu Keypad Ready.** Use keypad or dashboard controls below.", 
+        "📱 **Main Control Menu Ready.**", 
         persistent_keyboard=menu_keyboard
     )
 
-# INTERACTIVE DASHBOARD WITH DYNAMIC SOL CONTROLS
+# CLEANED INTERACTIVE DASHBOARD
 async def send_control_dashboard(session, chat_id):
     status_text = "🟢 **RUNNING**" if ONCHAIN_SNIPER_ACTIVE else "🔴 **STOPPED**"
     key_status = "✅ Private Key Loaded" if SOLANA_PRIVATE_KEY else "⚠️ Private Key Missing"
@@ -158,25 +156,13 @@ async def send_control_dashboard(session, chat_id):
         f"📡 **Status:** {status_text}\n"
         f"🔑 **Wallet:** {key_status}\n"
         f"💰 **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`\n"
-        f"⏱️ **Hold Timer:** `{HOLD_DURATION_SECONDS // 60} Minutes`\n\n"
-        f"💡 *Commands:* Type `/sol <amount>` (e.g. `/sol 0.02`) or click quick buttons below.\n"
-        f"🔥 *Trending:* Type `/trending` or `/top24` to view 24h market leaders."
+        f"⏱️ **Hold Timer:** `{HOLD_DURATION_SECONDS // 60} Minutes`"
     )
     
     keyboard = [
         [
             {"text": "⚡ Start Sniper", "callback_data": "btn_start_sniper"},
             {"text": "🛑 Stop Sniper", "callback_data": "btn_stop_sniper"}
-        ],
-        [
-            {"text": "0.02 SOL", "callback_data": "btn_set_sol_0.02"},
-            {"text": "0.05 SOL", "callback_data": "btn_set_sol_0.05"},
-            {"text": "0.1 SOL", "callback_data": "btn_set_sol_0.1"}
-        ],
-        [
-            {"text": "0.25 SOL", "callback_data": "btn_set_sol_0.25"},
-            {"text": "0.5 SOL", "callback_data": "btn_set_sol_0.5"},
-            {"text": "1.0 SOL", "callback_data": "btn_set_sol_1.0"}
         ],
         [
             {"text": "🔥 24H Trending Coins", "callback_data": "btn_fetch_trending"},
@@ -360,57 +346,50 @@ async def pumpfun_bonding_curve_sniper_loop(session):
             print(f"Pump.fun WebSocket error: {e}. Reconnecting in 3s...")
             await asyncio.sleep(3)
 
-# DYNAMIC TELEGRAM POLLING & BUTTON HANDLER
+# HIGH-RESPONSIVENESS TELEGRAM POLLING LOOP
 async def telegram_updates_polling_loop(session):
     global ONCHAIN_SNIPER_ACTIVE, SNIPER_BUY_AMOUNT_SOL, SOLANA_PRIVATE_KEY, AWAITING_PRIVATE_KEY
     offset = 0
     while True:
         try:
-            url = f"{TELEGRAM_API}/getUpdates?offset={offset}&timeout=10"
+            # Explicitly declare allowed updates for instant delivery across direct messages and channels
+            url = f"{TELEGRAM_API}/getUpdates?offset={offset}&timeout=10&allowed_updates=[\"message\",\"callback_query\",\"channel_post\"]"
             async with session.get(url, timeout=12) as response:
                 if response.status == 200:
                     data = await response.json()
                     for update in data.get("result", []):
                         offset = update["update_id"] + 1
                         
-                        # Handle Direct Chat Messages
-                        if "message" in update and "text" in update["message"]:
-                            chat_id = update["message"]["chat"]["id"]
-                            msg_id = update["message"]["message_id"]
-                            msg_text = update["message"]["text"].strip()
+                        # Support direct messages and channel posts
+                        msg_obj = update.get("message") or update.get("channel_post")
+
+                        if msg_obj and "text" in msg_obj:
+                            chat_id = msg_obj["chat"]["id"]
+                            msg_id = msg_obj["message_id"]
+                            msg_text = msg_obj["text"].strip()
                             ACTIVE_CHAT_IDS.add(chat_id)
 
-                            # INTERACTIVE PRIVATE KEY INPUT STEP
                             if AWAITING_PRIVATE_KEY:
                                 SOLANA_PRIVATE_KEY = msg_text
                                 AWAITING_PRIVATE_KEY = False
                                 ONCHAIN_SNIPER_ACTIVE = True
                                 
-                                # Immediately delete private key message for security
                                 await delete_telegram_message(session, chat_id, msg_id)
-                                
                                 await send_telegram_message(
                                     session, 
                                     chat_id, 
-                                    "🔒 **Private Key received safely!** *(Your message was deleted from chat for security)*\n\n"
+                                    "🔒 **Private Key received safely!** *(Deleted from chat history for security)*\n\n"
                                     f"🚀 **Sniper is now 🟢 ACTIVE!** Swapping `{SNIPER_BUY_AMOUNT_SOL} SOL` on new bonding curves."
                                 )
                                 await send_control_dashboard(session, chat_id)
                                 continue
 
-                            # Command & Keypad Handling
                             if msg_text in ["/start", "/sniper", "/dashboard", "/menu", "⚡ Sniper Dashboard"]:
                                 await send_persistent_chat_menu(session, chat_id)
                                 await send_control_dashboard(session, chat_id)
 
                             elif msg_text in ["/trending", "/top24", "/top", "/24h", "🔥 24H Trending Coins"]:
                                 asyncio.create_task(send_24h_trending_report(session, chat_id))
-
-                            elif msg_text in ["0.02 SOL", "0.05 SOL", "0.1 SOL", "0.25 SOL", "0.5 SOL", "1.0 SOL"]:
-                                val = float(msg_text.replace(" SOL", ""))
-                                SNIPER_BUY_AMOUNT_SOL = val
-                                await send_telegram_message(session, chat_id, f"✅ **Buy size set to `{SNIPER_BUY_AMOUNT_SOL} SOL`**")
-                                await send_control_dashboard(session, chat_id)
 
                             elif msg_text in ["📊 Status Report", "Status Report", "/status"]:
                                 status = "RUNNING" if ONCHAIN_SNIPER_ACTIVE else "STOPPED"
@@ -432,13 +411,19 @@ async def telegram_updates_polling_loop(session):
                                 else:
                                     await send_telegram_message(session, chat_id, f"ℹ️ Current buy size: `{SNIPER_BUY_AMOUNT_SOL} SOL`\nChange it with `/sol <amount>`")
 
-                        # Handle Inline Dashboard Buttons
                         elif "callback_query" in update:
                             cb = update["callback_query"]
                             cb_id = cb["id"]
                             cb_data = cb.get("data", "")
                             chat_id = cb["message"]["chat"]["id"]
                             ACTIVE_CHAT_IDS.add(chat_id)
+
+                            # Immediately answer callback to stop Telegram loading spinner
+                            try:
+                                async with session.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb_id}, timeout=3):
+                                    pass
+                            except Exception:
+                                pass
 
                             if cb_data == "btn_start_sniper":
                                 if not SOLANA_PRIVATE_KEY:
@@ -460,12 +445,6 @@ async def telegram_updates_polling_loop(session):
                                 await send_telegram_message(session, chat_id, "🛑 **Sniper Stopped.**")
                                 await send_control_dashboard(session, chat_id)
 
-                            elif cb_data.startswith("btn_set_sol_"):
-                                val = float(cb_data.replace("btn_set_sol_", ""))
-                                SNIPER_BUY_AMOUNT_SOL = val
-                                await send_telegram_message(session, chat_id, f"✅ **Buy size set to `{SNIPER_BUY_AMOUNT_SOL} SOL`**")
-                                await send_control_dashboard(session, chat_id)
-
                             elif cb_data == "btn_fetch_trending":
                                 asyncio.create_task(send_24h_trending_report(session, chat_id))
 
@@ -473,11 +452,9 @@ async def telegram_updates_polling_loop(session):
                                 status = "RUNNING" if ONCHAIN_SNIPER_ACTIVE else "STOPPED"
                                 await send_telegram_message(session, chat_id, f"📊 **Status:** `{status}` | **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`")
 
-                            async with session.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb_id}):
-                                pass
         except Exception as e:
             print(f"Telegram polling error: {e}")
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
 # PRO CALLOUT ALERT
 async def send_pro_channel_alert(session, token_data):

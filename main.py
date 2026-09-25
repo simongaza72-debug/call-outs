@@ -1,13 +1,14 @@
-Import asyncio
+import asyncio
 import json
 import os
 import aiohttp
+from datetime import datetime
 
 TELEGRAM_BOT_TOKEN = "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 TELEGRAM_CHAT_ID = "7113872351"
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Both chains supported
+# Both chains supported for base engine, new strategy is Solana only
 SUPPORTED_CHAINS = ["solana", "robinhood"]
 DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_RECENT_PROFILES = "https://api.dexscreener.com/token-profiles/recent-updates/v1"
@@ -26,25 +27,37 @@ def load_persistence():
                 return (
                     set(data.get("processed", [])), 
                     data.get("tracked", {}),
-                    data.get("incubation", {})
+                    data.get("incubation", {}),
+                    data.get("solana_200k_tracked", {}),
+                    data.get("daily_strategy", {"date": "", "count": 0})
                 )
         except Exception as e:
             print(f"Error loading persistence file: {e}")
-    return set(), {}, {}
+    return set(), {}, {}, {}, {"date": "", "count": 0}
 
-def save_persistence(processed_set, tracked_dict, incubation_dict):
+def save_persistence(processed_set, tracked_dict, incubation_dict, solana_200k_tracked, daily_strategy):
     try:
         with open(PERSISTENCE_FILE, "w") as f:
             json.dump({
                 "processed": list(processed_set),
                 "tracked": tracked_dict,
-                "incubation": incubation_dict
+                "incubation": incubation_dict,
+                "solana_200k_tracked": solana_200k_tracked,
+                "daily_strategy": daily_strategy
             }, f)
     except Exception as e:
         print(f"Error saving persistence file: {e}")
 
-processed_txs, tracked_tokens, incubation_tokens = load_persistence()
+processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state = load_persistence()
 processing_lock = asyncio.Lock()
+
+def check_and_reset_daily_quota():
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    if daily_strategy_state.get("date") != today_str:
+        daily_strategy_state["date"] = today_str
+        daily_strategy_state["count"] = 0
+        return True
+    return daily_strategy_state["count"] < 5
 
 async def send_telegram_message(session, text, inline_keyboard=None):
     try:
@@ -164,6 +177,56 @@ async def send_pro_channel_alert(session, token_data):
     else:
         await send_telegram_message(session, caption, keyboard)
 
+async def send_solana_200k_strategy_alert(session, token_data):
+    caption = (
+        f"🎯 **SOLANA $200K TARGET STRATEGY ENTRY** 🎯\n\n"
+        f"🪙 **Token:** {token_data['name']} (${token_data['symbol']})\n"
+        f"📈 **Entry Market Cap:** ${token_data['mc']:,}\n"
+        f"🎯 **Target Exit:** $200,000 MC\n"
+        f"📋 **CA:** `{token_data['address']}`\n\n"
+        f"🔥 *Daily 5-Solana Strategy Slot Locked, baby. 6767*"
+    )
+    keyboard = [[{"text": "📈 Chart", "url": token_data["url"]}]]
+    if token_data.get("image") and token_data["image"].startswith("http"):
+        await send_telegram_photo(session, token_data["image"], caption, keyboard)
+    else:
+        await send_telegram_message(session, caption, keyboard)
+
+async def check_solana_200k_milestones(session):
+    if not solana_200k_tracked:
+        return
+
+    updated = False
+    for mint_address, data in list(solana_200k_tracked.items()):
+        if data["target_hit"]:
+            continue
+        
+        try:
+            async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
+                if res.status == 200:
+                    json_data = await res.json()
+                    pairs = json_data.get("pairs", [])
+                    if pairs:
+                        current_mc = pairs[0].get("marketCap") or pairs[0].get("fdv") or 0
+                        
+                        if current_mc >= 200000:
+                            solana_200k_tracked[mint_address]["target_hit"] = True
+                            updated = True
+                            caption = (
+                                f"💰 **SOLANA $200K TARGET REACHED & SOLD!** 💰\n\n"
+                                f"🪙 **Token:** {data['name']} (${data['symbol']})\n"
+                                f"💵 **Initial Entry MC:** ${data['initial_mc']:,}\n"
+                                f"🚀 **Target Hit MC:** ${current_mc:,} (>= $200K Target!)\n"
+                                f"🔑 **CA:** `{mint_address}`\n\n"
+                                f"🛡️ *Dump secured, baby. Strategy executed successfully.* 6767"
+                            )
+                            await send_telegram_message(session, caption)
+        except Exception as e:
+            print(f"Solana 200k milestone error: {e}")
+            
+    if updated:
+        save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
+
 async def check_token_milestones(session):
     if not tracked_tokens:
         return
@@ -191,14 +254,14 @@ async def check_token_milestones(session):
                                 f"💵 **Initial Call:** ${initial_mc:,}\n"
                                 f"🚀 **Current MC:** ${current_mc:,} (10x+ Hit!)\n"
                                 f"🔑 **CA:** `{mint_address}`\n\n"
-                                f"🛡️ *Target secured, simonveyron.* 6767"
+                                f"🛡️ *Target secured, baby.* 6767"
                             )
                             await send_telegram_message(session, caption)
         except Exception as e:
             print(f"Milestone tracking error: {e}")
             
     if updated:
-        save_persistence(processed_txs, tracked_tokens, incubation_tokens)
+        save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
 
 async def incubation_checker_loop(session):
     while True:
@@ -284,7 +347,7 @@ async def incubation_checker_loop(session):
                 print(f"Incubation check error for {mint_address}: {e}")
                 
         if updated:
-            save_persistence(processed_txs, tracked_tokens, incubation_tokens)
+            save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
             
         await asyncio.sleep(10)
 
@@ -295,7 +358,7 @@ async def process_token_discovery(session, chain, raw_mint):
     mint_address = raw_mint.strip().lower()
 
     async with processing_lock:
-        if mint_address in tracked_tokens or mint_address in incubation_tokens or mint_address in processed_txs:
+        if mint_address in tracked_tokens or mint_address in incubation_tokens or mint_address in processed_txs or mint_address in solana_200k_tracked:
             return
     
     try:
@@ -310,17 +373,49 @@ async def process_token_discovery(session, chain, raw_mint):
             p = pairs[0]
             market_cap = p.get("marketCap") or p.get("fdv") or 0
             
-            if market_cap > 150000:
+            if market_cap > 150000 and (chain != "solana" or market_cap >= 200000):
                 async with processing_lock:
                     processed_txs.add(mint_address)
                 return
             
             passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p, market_cap)
             if passes_intel:
+                # NEW SOLANA $200K STRATEGY (Solana only, market cap below $200K, max 5 per day)
+                if chain == "solana" and market_cap < 200000:
+                    async with processing_lock:
+                        if check_and_reset_daily_quota() and mint_address not in solana_200k_tracked:
+                            daily_strategy_state["count"] += 1
+                            base_token = p.get("baseToken", {})
+                            token_name = base_token.get("name", "Unknown")
+                            token_symbol = base_token.get("symbol", "???")
+                            url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
+                            image_url = p.get("info", {}).get("imageUrl")
+
+                            solana_200k_tracked[mint_address] = {
+                                "chain": chain,
+                                "initial_mc": market_cap,
+                                "name": token_name,
+                                "symbol": token_symbol,
+                                "target_hit": False
+                            }
+                            processed_txs.add(mint_address)
+                            save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
+                            print(f"[+] SOLANA 200K STRATEGY ACTIVE ({daily_strategy_state['count']}/5): {token_name} at MC${market_cap:,} [6767]")
+                            
+                            await send_solana_200k_strategy_alert(session, {
+                                "chain": chain,
+                                "name": token_name,
+                                "symbol": token_symbol,
+                                "address": mint_address,
+                                "mc": market_cap,
+                                "url": url,
+                                "image": image_url
+                            })
+
                 if market_cap < 50000:
                     async with processing_lock:
                         incubation_tokens[mint_address] = {"chain": chain}
-                    save_persistence(processed_txs, tracked_tokens, incubation_tokens)
+                    save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
                     print(f"[*] Added to Incubation Watchlist: {mint_address} at MC${market_cap:,} [6767]")
                     return
 
@@ -364,7 +459,7 @@ async def process_token_discovery(session, chain, raw_mint):
                         "milestone_sent": False
                     }
                 
-                save_persistence(processed_txs, tracked_tokens, incubation_tokens)
+                save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
                 print(f"[+] PRO ALERT DISPATCHED: {token_name} (${token_symbol}) at MC${market_cap:,} [6767]")
                 
                 await send_pro_channel_alert(session, {
@@ -399,7 +494,7 @@ async def dexscreener_dual_feed_loop(session):
                             if chain in SUPPORTED_CHAINS:
                                 mint_address = profile.get("tokenAddress")
                                 if mint_address:
-                                    async asyncio.create_task(process_token_discovery(session, chain, mint_address))
+                                    asyncio.create_task(process_token_discovery(session, chain, mint_address))
         except Exception as e:
             print(f"DexScreener feed fetch error: {e}")
         await asyncio.sleep(2)
@@ -407,11 +502,10 @@ async def dexscreener_dual_feed_loop(session):
 async def milestone_checker_loop(session):
     while True:
         await check_token_milestones(session)
+        await check_solana_200k_milestones(session)
         await asyncio.sleep(15)
 
-# --- ACTIVATED OPERATIONAL STRATEGY LOOPS ---
 async def deployer_wallet_tracking_loop(session):
-    """Actively polls trending deployment clusters and top boosted tokens for serial dev wallets."""
     while True:
         try:
             async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=10) as res:
@@ -422,13 +516,12 @@ async def deployer_wallet_tracking_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = item.get("tokenAddress")
                             if mint:
-                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+                                asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Deployer tracker error: {e}")
         await asyncio.sleep(20)
 
 async def mempool_sniffing_loop(session):
-    """High-frequency query stream capturing block-zero initialization liquidity feeds."""
     while True:
         try:
             async with session.get(DEXSCREENER_RECENT_PROFILES, timeout=10) as res:
@@ -440,13 +533,12 @@ async def mempool_sniffing_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = p.get("tokenAddress")
                             if mint:
-                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+                                asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Mempool sniffer feed error: {e}")
         await asyncio.sleep(5)
 
 async def social_alpha_scraping_loop(session):
-    """Live parses DexScreener latest boosted momentum and alpha feeds."""
     while True:
         try:
             async with session.get(DEXSCREENER_BOOSTED_LATEST, timeout=10) as res:
@@ -457,13 +549,13 @@ async def social_alpha_scraping_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = item.get("tokenAddress")
                             if mint:
-                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+                                asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Social alpha scraper error: {e}")
         await asyncio.sleep(12)
 
 async def run_pro_omnichain_sniper():
-    print("Elite Pro-Styled OmniChain Sniper ($50K-$150K) + Full Alpha Infrastructure fully active, simonveyron.")
+    print("Elite Pro-Styled OmniChain Sniper + Solana Daily 5x $200K Strategy fully active, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             dexscreener_dual_feed_loop(session),

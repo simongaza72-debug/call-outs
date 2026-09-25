@@ -484,7 +484,7 @@ async def dexscreener_dual_feed_loop(session):
                             if chain in SUPPORTED_CHAINS:
                                 mint_address = profile.get("tokenAddress")
                                 if mint_address:
-                                    async asyncio.create_task(process_token_discovery(session, chain, mint_address))
+                                    asyncio.create_task(process_token_discovery(session, chain, mint_address))
         except Exception as e:
             print(f"DexScreener feed fetch error: {e}")
         await asyncio.sleep(2)
@@ -507,7 +507,7 @@ async def deployer_wallet_tracking_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = item.get("tokenAddress")
                             if mint:
-                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+                                asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Deployer tracker error: {e}")
         await asyncio.sleep(20)
@@ -525,7 +525,7 @@ async def mempool_sniffing_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = p.get("tokenAddress")
                             if mint:
-                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+                                asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Mempool sniffer feed error: {e}")
         await asyncio.sleep(5)
@@ -542,7 +542,7 @@ async def social_alpha_scraping_loop(session):
                         if chain in SUPPORTED_CHAINS:
                             mint = item.get("tokenAddress")
                             if mint:
-                                async asyncio.create_task(process_token_discovery(session, chain, mint))
+                                asyncio.create_task(process_token_discovery(session, chain, mint))
         except Exception as e:
             print(f"Social alpha scraper error: {e}")
         await asyncio.sleep(12)
@@ -551,7 +551,6 @@ async def social_alpha_scraping_loop(session):
 async def telegram_polling_loop(session):
     """Polls Telegram updates to respond when bottom menu buttons are pressed."""
     offset = 0
-    # Register/display the bottom reply menu when the bot starts
     await send_main_menu(session, "🤖 **OmniChain Sniper Bot Active!**\n\nUse the menu buttons below to fetch live trending memecoins anytime.")
     
     while True:

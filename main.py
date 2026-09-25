@@ -6,12 +6,21 @@ import websockets
 from datetime import datetime
 from dotenv import load_dotenv
 
+# Optional Solana libraries for public key derivation
+try:
+    import base58
+    from solders.keypair import Keypair
+    HAS_SOLANA_LIBS = True
+except ImportError:
+    HAS_SOLANA_LIBS = False
+
 # Load local environment variables for security
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw")
 DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7113872351")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 
 # Private key state & dynamic chat tracking
 SOLANA_PRIVATE_KEY = os.getenv("SOLANA_PRIVATE_KEY", "")
@@ -39,7 +48,8 @@ MAX_DAILY_SOLANA_STRATEGY = 5
 
 # Dynamic Sniper State
 ONCHAIN_SNIPER_ACTIVE = False
-SNIPER_BUY_AMOUNT_SOL = 0.1  # Dynamic buy amount in SOL
+MIN_SOL_BUY_AMOUNT = 0.02
+SNIPER_BUY_AMOUNT_SOL = 0.02  # Default set to 0.02 SOL
 HOLD_DURATION_SECONDS = 180   # 3-Minute Hold/Sell Timer
 
 def load_persistence():
@@ -74,6 +84,39 @@ def save_persistence(processed_set, tracked_dict, incubation_dict, solana_200k_t
 processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state = load_persistence()
 processing_lock = asyncio.Lock()
 
+def get_public_key_from_private(privkey_str):
+    if not privkey_str:
+        return None
+    if HAS_SOLANA_LIBS:
+        try:
+            decoded = base58.b58decode(privkey_str)
+            kp = Keypair.from_bytes(decoded) if len(decoded) == 64 else Keypair.from_seed(decoded[:32])
+            return str(kp.pubkey())
+        except Exception:
+            pass
+    if len(privkey_str) in [43, 44]:
+        return privkey_str
+    return None
+
+async def get_wallet_balance_sol(session, wallet_address):
+    if not wallet_address:
+        return 0.0
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalance",
+            "params": [wallet_address]
+        }
+        async with session.post(SOLANA_RPC_URL, json=payload, timeout=5) as res:
+            if res.status == 200:
+                data = await res.json()
+                lamports = data.get("result", {}).get("value", 0)
+                return lamports / 1_000_000_000.0
+    except Exception as e:
+        print(f"RPC Balance Check Error: {e}")
+    return 0.0
+
 def check_and_reset_daily_quota():
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     if daily_strategy_state.get("date") != today_str:
@@ -87,7 +130,8 @@ async def send_telegram_message(session, chat_id, text, inline_keyboard=None, pe
         payload = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": "Markdown"
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
         }
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
@@ -146,16 +190,27 @@ async def send_persistent_chat_menu(session, chat_id):
         persistent_keyboard=menu_keyboard
     )
 
-# CLEANED INTERACTIVE DASHBOARD
 async def send_control_dashboard(session, chat_id):
     status_text = "🟢 **RUNNING**" if ONCHAIN_SNIPER_ACTIVE else "🔴 **STOPPED**"
-    key_status = "✅ Private Key Loaded" if SOLANA_PRIVATE_KEY else "⚠️ Private Key Missing"
+    pubkey = get_public_key_from_private(SOLANA_PRIVATE_KEY)
+    
+    if SOLANA_PRIVATE_KEY and pubkey:
+        balance = await get_wallet_balance_sol(session, pubkey)
+        key_status = f"✅ Loaded (`{pubkey[:4]}...{pubkey[-4:]}`)"
+        bal_status = f"`{balance:.4f} SOL`"
+    elif SOLANA_PRIVATE_KEY:
+        key_status = "✅ Private Key Loaded"
+        bal_status = "`Checking...`"
+    else:
+        key_status = "⚠️ Missing"
+        bal_status = "`0.00 SOL`"
     
     text = (
         f"⚡ **SOLANA ON-CHAIN SNIPER CONTROLLER** ⚡\n\n"
         f"📡 **Status:** {status_text}\n"
         f"🔑 **Wallet:** {key_status}\n"
-        f"💰 **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`\n"
+        f"💳 **Balance:** {bal_status}\n"
+        f"💰 **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL` *(Min: 0.02 SOL)*\n"
         f"⏱️ **Hold Timer:** `{HOLD_DURATION_SECONDS // 60} Minutes`"
     )
     
@@ -171,12 +226,10 @@ async def send_control_dashboard(session, chat_id):
     ]
     await send_telegram_message(session, chat_id, text, inline_keyboard=keyboard)
 
-# 24-HOUR TRENDING MEMECOINS COMMAND (/trending, /top24, /top)
 async def send_24h_trending_report(session, chat_id):
     await send_telegram_message(session, chat_id, "🔍 *Fetching 24H Trending Memecoins across Solana and Robinhood networks...*")
     
-    solana_tokens = []
-    robinhood_tokens = []
+    solana_tokens, robinhood_tokens = [], []
 
     try:
         async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=10) as res:
@@ -188,8 +241,7 @@ async def send_24h_trending_report(session, chat_id):
                 for item in items:
                     chain = item.get("chainId", "").lower()
                     mint = item.get("tokenAddress")
-                    if not mint:
-                        continue
+                    if not mint: continue
 
                     if chain == "solana" and mint not in seen_sol and len(solana_tokens) < 5:
                         seen_sol.add(mint)
@@ -198,13 +250,12 @@ async def send_24h_trending_report(session, chat_id):
                         seen_rh.add(mint)
                         robinhood_tokens.append(mint)
 
-                    if len(solana_tokens) >= 5 and len(robinhood_tokens) >= 5:
-                        break
+                    if len(solana_tokens) >= 5 and len(robinhood_tokens) >= 5: break
     except Exception as e:
-        print(f"Error fetching boosted tokens for trending report: {e}")
+        print(f"Error fetching trending report: {e}")
 
     report_lines = ["🔥 **TOP 24H TRENDING MEMECOINS** 🔥\n"]
-    report_lines.append("🌐 **SOLANA TOP 24H RUNNERS:**")
+    report_lines.append("🌐 **SOLANA TOP RUNNERS:**")
     if solana_tokens:
         for idx, mint in enumerate(solana_tokens, 1):
             try:
@@ -225,11 +276,11 @@ async def send_24h_trending_report(session, chat_id):
                                 f"   └ 📋 `{mint}`"
                             )
             except Exception as e:
-                print(f"Error fetching details for {mint}: {e}")
+                print(f"Error details for {mint}: {e}")
     else:
-        report_lines.append("*(No active Solana high-volume runners detected right now)*")
+        report_lines.append("*(No active Solana runners detected right now)*")
 
-    report_lines.append("\n🌐 **ROBINHOOD TOP 24H RUNNERS:**")
+    report_lines.append("\n🌐 **ROBINHOOD TOP RUNNERS:**")
     if robinhood_tokens:
         for idx, mint in enumerate(robinhood_tokens, 1):
             try:
@@ -250,11 +301,10 @@ async def send_24h_trending_report(session, chat_id):
                                 f"   └ 📋 `{mint}`"
                             )
             except Exception as e:
-                print(f"Error fetching details for Robinhood {mint}: {e}")
+                print(f"Error details for Robinhood {mint}: {e}")
     else:
-        report_lines.append("*(No active Robinhood high-volume runners detected right now)*")
+        report_lines.append("*(No active Robinhood runners detected right now)*")
 
-    report_lines.append("\n💎 *Engine tracking live market liquidity.*")
     final_text = "\n".join(report_lines)
     await send_telegram_message(session, chat_id, final_text)
 
@@ -273,27 +323,67 @@ def fast_bonding_curve_check(event_data):
     except Exception as e:
         return False, f"Check Error: {e}"
 
-async def execute_bonding_curve_trade(session, action, mint_address, amount_sol=0.1):
-    if not SOLANA_PRIVATE_KEY:
-        print("[-] Cannot execute trade: Local private key is missing.")
-        return False
+async def execute_bonding_curve_trade(session, action, mint_address, amount_sol=0.02):
+    global ONCHAIN_SNIPER_ACTIVE
     
+    if not SOLANA_PRIVATE_KEY:
+        print("[-] Trade Skipped: Private key missing.")
+        return False, "Missing Private Key"
+
+    pubkey = get_public_key_from_private(SOLANA_PRIVATE_KEY)
+    
+    if action == "buy":
+        balance = await get_wallet_balance_sol(session, pubkey)
+        required = float(amount_sol) + 0.003
+        
+        if balance < required:
+            error_msg = (
+                f"⚠️ **TRADE CANCELLED: INSUFFICIENT SOL**\n\n"
+                f"💳 **Current Wallet Balance:** `{balance:.4f} SOL`\n"
+                f"🎯 **Required Amount:** `{required:.4f} SOL`\n"
+                f"🛑 *Stopping sniper loop. Please deposit SOL to your wallet.*"
+            )
+            ONCHAIN_SNIPER_ACTIVE = False
+            await broadcast_telegram_message(session, error_msg)
+            return False, "Insufficient SOL"
+
+    payload = {
+        "publicKey": pubkey if pubkey else SOLANA_PRIVATE_KEY,
+        "action": action,
+        "mint": mint_address,
+        "denominatedInSol": "true" if action == "buy" else "false",
+        "amount": amount_sol if action == "buy" else "100%",
+        "slippage": 10,
+        "priorityFee": 0.0005,
+        "pool": "pump"
+    }
+
     try:
-        print(f"[⚡ ON-CHAIN TRADE] {action.upper()} {mint_address} for {amount_sol} SOL")
-        return True
+        async with session.post(PUMP_PORTAL_TX_API, json=payload, timeout=10) as res:
+            if res.status == 200:
+                print(f"[⚡ ON-CHAIN TRADE SUCCESS] {action.upper()} {mint_address}")
+                return True, "Success"
+            else:
+                text = await res.text()
+                print(f"[-] PumpPortal Trade API error: {text}")
+                return False, text
     except Exception as e:
-        print(f"On-chain trade execution failed: {e}")
-        return False
+        print(f"[-] On-chain execution exception: {e}")
+        return False, str(e)
 
 async def auto_sell_worker(session, mint_address, name, symbol):
     await asyncio.sleep(HOLD_DURATION_SECONDS)
-    sell_success = await execute_bonding_curve_trade(session, "sell", mint_address, amount_sol="100%")
+    sell_success, reason = await execute_bonding_curve_trade(session, "sell", mint_address, amount_sol="100%")
+    
     if sell_success:
+        pubkey = get_public_key_from_private(SOLANA_PRIVATE_KEY)
+        new_balance = await get_wallet_balance_sol(session, pubkey)
         sell_text = (
             f"💰 **3-MINUTE AUTO-SELL EXECUTED** 💰\n\n"
             f"🪙 **Token:** {name} (${symbol})\n"
             f"📋 **CA:** `{mint_address}`\n"
-            f"🔄 *Position liquidated back to SOL.*"
+            f"💳 **Updated Wallet Balance:** `{new_balance:.4f} SOL`\n"
+            f"🔄 *SOL recycled back into balance pool for next sniper loop!*"
         )
         await broadcast_telegram_message(session, sell_text)
 
@@ -309,7 +399,6 @@ async def pumpfun_bonding_curve_sniper_loop(session):
                 
                 async for message in ws:
                     if not ONCHAIN_SNIPER_ACTIVE:
-                        await asyncio.sleep(1)
                         continue
 
                     data = json.loads(message)
@@ -324,12 +413,14 @@ async def pumpfun_bonding_curve_sniper_loop(session):
                         if mint in processed_txs:
                             continue
                         processed_txs.add(mint)
+                        save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
 
                     passed, reason = fast_bonding_curve_check(data)
                     if not passed:
                         continue
 
-                    buy_success = await execute_bonding_curve_trade(session, "buy", mint, SNIPER_BUY_AMOUNT_SOL)
+                    buy_success, err_reason = await execute_bonding_curve_trade(session, "buy", mint, SNIPER_BUY_AMOUNT_SOL)
+                    
                     if buy_success:
                         alert_text = (
                             f"⚡ **BONDING CURVE SNIPE EXECUTED!** ⚡\n\n"
@@ -346,21 +437,17 @@ async def pumpfun_bonding_curve_sniper_loop(session):
             print(f"Pump.fun WebSocket error: {e}. Reconnecting in 3s...")
             await asyncio.sleep(3)
 
-# HIGH-RESPONSIVENESS TELEGRAM POLLING LOOP
 async def telegram_updates_polling_loop(session):
     global ONCHAIN_SNIPER_ACTIVE, SNIPER_BUY_AMOUNT_SOL, SOLANA_PRIVATE_KEY, AWAITING_PRIVATE_KEY
     offset = 0
     while True:
         try:
-            # Explicitly declare allowed updates for instant delivery across direct messages and channels
             url = f"{TELEGRAM_API}/getUpdates?offset={offset}&timeout=10&allowed_updates=[\"message\",\"callback_query\",\"channel_post\"]"
             async with session.get(url, timeout=12) as response:
                 if response.status == 200:
                     data = await response.json()
                     for update in data.get("result", []):
                         offset = update["update_id"] + 1
-                        
-                        # Support direct messages and channel posts
                         msg_obj = update.get("message") or update.get("channel_post")
 
                         if msg_obj and "text" in msg_obj:
@@ -372,15 +459,26 @@ async def telegram_updates_polling_loop(session):
                             if AWAITING_PRIVATE_KEY:
                                 SOLANA_PRIVATE_KEY = msg_text
                                 AWAITING_PRIVATE_KEY = False
-                                ONCHAIN_SNIPER_ACTIVE = True
                                 
                                 await delete_telegram_message(session, chat_id, msg_id)
-                                await send_telegram_message(
-                                    session, 
-                                    chat_id, 
-                                    "🔒 **Private Key received safely!** *(Deleted from chat history for security)*\n\n"
-                                    f"🚀 **Sniper is now 🟢 ACTIVE!** Swapping `{SNIPER_BUY_AMOUNT_SOL} SOL` on new bonding curves."
-                                )
+                                pubkey = get_public_key_from_private(SOLANA_PRIVATE_KEY)
+                                balance = await get_wallet_balance_sol(session, pubkey)
+                                
+                                if balance < SNIPER_BUY_AMOUNT_SOL:
+                                    ONCHAIN_SNIPER_ACTIVE = False
+                                    await send_telegram_message(
+                                        session, chat_id,
+                                        f"🔒 **Private Key Saved!**\n\n"
+                                        f"⚠️ **Warning:** Wallet balance is `{balance:.4f} SOL`.\n"
+                                        f"Please deposit SOL (Minimum `{SNIPER_BUY_AMOUNT_SOL} SOL`) before starting."
+                                    )
+                                else:
+                                    ONCHAIN_SNIPER_ACTIVE = True
+                                    await send_telegram_message(
+                                        session, chat_id,
+                                        f"🔒 **Private Key Saved!**\n\n"
+                                        f"🚀 **Sniper is 🟢 ACTIVE!** Balance: `{balance:.4f} SOL`"
+                                    )
                                 await send_control_dashboard(session, chat_id)
                                 continue
 
@@ -393,21 +491,28 @@ async def telegram_updates_polling_loop(session):
 
                             elif msg_text in ["📊 Status Report", "Status Report", "/status"]:
                                 status = "RUNNING" if ONCHAIN_SNIPER_ACTIVE else "STOPPED"
-                                await send_telegram_message(session, chat_id, f"📊 **Status:** `{status}` | **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`")
+                                pubkey = get_public_key_from_private(SOLANA_PRIVATE_KEY)
+                                balance = await get_wallet_balance_sol(session, pubkey)
+                                await send_telegram_message(
+                                    session, chat_id, 
+                                    f"📊 **Status:** `{status}`\n"
+                                    f"💳 **Wallet Balance:** `{balance:.4f} SOL`\n"
+                                    f"💰 **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`"
+                                )
 
                             elif msg_text.startswith("/sol") or msg_text.startswith("/amount"):
                                 parts = msg_text.split()
                                 if len(parts) > 1:
                                     try:
                                         new_amt = float(parts[1])
-                                        if new_amt > 0:
+                                        if new_amt >= MIN_SOL_BUY_AMOUNT:
                                             SNIPER_BUY_AMOUNT_SOL = new_amt
                                             await send_telegram_message(session, chat_id, f"✅ **Sniper Buy Size Updated:** `{SNIPER_BUY_AMOUNT_SOL} SOL`")
                                             await send_control_dashboard(session, chat_id)
                                         else:
-                                            await send_telegram_message(session, chat_id, "⚠️ Amount must be greater than 0.")
+                                            await send_telegram_message(session, chat_id, f"⚠️ Minimum buy amount is `{MIN_SOL_BUY_AMOUNT} SOL`.")
                                     except ValueError:
-                                        await send_telegram_message(session, chat_id, "❌ Invalid input. Example: `/sol 0.02` or `/sol 0.5`")
+                                        await send_telegram_message(session, chat_id, "❌ Invalid input. Example: `/sol 0.02` or `/sol 0.1`")
                                 else:
                                     await send_telegram_message(session, chat_id, f"ℹ️ Current buy size: `{SNIPER_BUY_AMOUNT_SOL} SOL`\nChange it with `/sol <amount>`")
 
@@ -418,7 +523,6 @@ async def telegram_updates_polling_loop(session):
                             chat_id = cb["message"]["chat"]["id"]
                             ACTIVE_CHAT_IDS.add(chat_id)
 
-                            # Immediately answer callback to stop Telegram loading spinner
                             try:
                                 async with session.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb_id}, timeout=3):
                                     pass
@@ -429,20 +533,28 @@ async def telegram_updates_polling_loop(session):
                                 if not SOLANA_PRIVATE_KEY:
                                     AWAITING_PRIVATE_KEY = True
                                     await send_telegram_message(
-                                        session, 
-                                        chat_id, 
-                                        "🔑 **Private Key Required to Start Sniper!**\n\n"
-                                        "Please paste your **Solana Private Key** (Base58 string from Phantom/Solflare).\n\n"
-                                        "🛡️ *Your message will be automatically deleted from chat history in <1s for security.*"
+                                        session, chat_id, 
+                                        "🔑 **Private Key Required!**\n\n"
+                                        "Please paste your **Solana Private Key** (Base58 string).\n\n"
+                                        "🛡️ *Your message will be instantly deleted after receiving for security.*"
                                     )
                                 else:
-                                    ONCHAIN_SNIPER_ACTIVE = True
-                                    await send_telegram_message(session, chat_id, f"🚀 **Sniper Activated!** Swapping `{SNIPER_BUY_AMOUNT_SOL} SOL` on new bonding curves.")
+                                    pubkey = get_public_key_from_private(SOLANA_PRIVATE_KEY)
+                                    balance = await get_wallet_balance_sol(session, pubkey)
+                                    if balance < SNIPER_BUY_AMOUNT_SOL:
+                                        await send_telegram_message(
+                                            session, chat_id,
+                                            f"⚠️ **Cannot Start Sniper:** Wallet balance is `{balance:.4f} SOL`.\n"
+                                            f"Deposit at least `{SNIPER_BUY_AMOUNT_SOL} SOL` to activate."
+                                        )
+                                    else:
+                                        ONCHAIN_SNIPER_ACTIVE = True
+                                        await send_telegram_message(session, chat_id, f"🚀 **Sniper Activated!** Buy size: `{SNIPER_BUY_AMOUNT_SOL} SOL`")
                                     await send_control_dashboard(session, chat_id)
 
                             elif cb_data == "btn_stop_sniper":
                                 ONCHAIN_SNIPER_ACTIVE = False
-                                await send_telegram_message(session, chat_id, "🛑 **Sniper Stopped.**")
+                                await send_telegram_message(session, chat_id, "🛑 **Sniper Stopped Instantly.**")
                                 await send_control_dashboard(session, chat_id)
 
                             elif cb_data == "btn_fetch_trending":
@@ -450,13 +562,17 @@ async def telegram_updates_polling_loop(session):
 
                             elif cb_data == "btn_sniper_status":
                                 status = "RUNNING" if ONCHAIN_SNIPER_ACTIVE else "STOPPED"
-                                await send_telegram_message(session, chat_id, f"📊 **Status:** `{status}` | **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`")
+                                pubkey = get_public_key_from_private(SOLANA_PRIVATE_KEY)
+                                balance = await get_wallet_balance_sol(session, pubkey)
+                                await send_telegram_message(
+                                    session, chat_id, 
+                                    f"📊 **Status:** `{status}` | **Balance:** `{balance:.4f} SOL` | **Buy Size:** `{SNIPER_BUY_AMOUNT_SOL} SOL`"
+                                )
 
         except Exception as e:
             print(f"Telegram polling error: {e}")
         await asyncio.sleep(0.5)
 
-# PRO CALLOUT ALERT
 async def send_pro_channel_alert(session, token_data):
     target_mc = token_data["mc"] * 10
     chain_name = token_data["chain"].upper()

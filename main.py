@@ -45,7 +45,6 @@ def save_persistence(processed_set, tracked_dict, incubation_dict):
 
 processed_txs, tracked_tokens, incubation_tokens = load_persistence()
 processing_lock = asyncio.Lock()
-last_update_id = 0
 
 async def send_telegram_message(session, text, inline_keyboard=None, target_chat_id=None):
     try:
@@ -79,41 +78,10 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
     except Exception as e:
         print(f"Telegram photo error: {e}")
 
-async def send_control_dashboard(session, chat_id):
-    keyboard = {
-        "keyboard": [
-            [{"text": "🔥 24h Trending"}, {"text": "📊 Status"}]
-        ],
-        "resize_keyboard": True
-    }
-    payload = {
-        "chat_id": chat_id,
-        "text": "🤖 *OmniChain Sniper Engine Active*\n\nSelect an option below or use /trending to fetch live metrics:",
-        "parse_mode": "Markdown",
-        "reply_markup": keyboard
-    }
-    try:
-        async with session.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=5):
-            pass
-    except Exception as e:
-        print(f"Dashboard dispatch error: {e}")
-
-async def fetch_token_pair_details(session, mint_address):
-    try:
-        async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
-            if res.status == 200:
-                data = await res.json()
-                pairs = data.get("pairs", [])
-                if pairs:
-                    return pairs[0]
-    except Exception as e:
-        print(f"Pair details fetch error ({mint_address}): {e}")
-    return None
-
-async def send_24h_trending_report(session, chat_id):
-    await send_telegram_message(session, "🔍 *Fetching top 24h trending memecoins for Solana & Robinhood...*", target_chat_id=chat_id)
-    
-    trending = {"solana": [], "robinhood": []}
+async def handle_trending_command(session, chat_id):
+    await send_telegram_message(session, "🔍 *Fetching live trending memecoins for Solana & Robinhood...*", target_chat_id=chat_id)
+    trending_sol = []
+    trending_rh = []
     
     try:
         async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=8) as res:
@@ -123,103 +91,75 @@ async def send_24h_trending_report(session, chat_id):
                     for item in items:
                         chain = item.get("chainId", "").lower()
                         mint = item.get("tokenAddress")
-                        if chain in SUPPORTED_CHAINS and mint:
-                            if len(trending[chain]) < 5 and mint not in [t["mint"] for t in trending[chain]]:
-                                trending[chain].append({"mint": mint, "url": item.get("url")})
+                        url = item.get("url", "")
+                        if chain == "solana" and len(trending_sol) < 5 and mint:
+                            if mint not in [x[0] for x in trending_sol]:
+                                trending_sol.append((mint, url))
+                        elif chain == "robinhood" and len(trending_rh) < 5 and mint:
+                            if mint not in [x[0] for x in trending_rh]:
+                                trending_rh.append((mint, url))
     except Exception as e:
         print(f"Trending fetch error: {e}")
 
-    lines = ["🔥 *TOP 24H TRENDING MEMECOINS* 🔥\n"]
-    
-    for chain in ["solana", "robinhood"]:
-        chain_title = "⚡ *SOLANA TRENDING*" if chain == "solana" else "🏹 *ROBINHOOD TRENDING*"
-        lines.append(chain_title)
-        
-        mints = trending[chain]
-        if not mints:
-            lines.append("  _No active trending tokens found currently._\n")
-            continue
-            
-        count = 0
-        for item in mints:
-            pair = await fetch_token_pair_details(session, item["mint"])
-            if pair:
-                count += 1
-                base = pair.get("baseToken", {})
-                name = base.get("name", "Unknown")
-                symbol = base.get("symbol", "???")
-                mc = pair.get("marketCap") or pair.get("fdv") or 0
-                vol = pair.get("volume", {}).get("h24", 0)
-                change = pair.get("priceChange", {}).get("h24", 0)
-                change_str = f"+{change:.1f}%" if change >= 0 else f"{change:.1f}%"
-                token_url = pair.get("url", item.get("url", f"https://dexscreener.com/{chain}/{item['mint']}"))
-                
-                lines.append(
-                    f"{count}. *{name}* (`${symbol}`)\n"
-                    f"   • MC: *${mc:,.0f}* \vert{} 24h Vol: *${vol:,.0f}* | 24h: *{change_str}*\n"
-                    f"   • [DexScreener Chart]({token_url}) | `{item['mint']}`"
-                )
-        if count == 0:
-            lines.append("  _Unable to load live details for trending tokens._")
-        lines.append("")
-        
-    lines.append("6767 | *OmniChain Sniper*")
-    report = "\n".join(lines)
-    
-    inline_keyboard = [
-        [{"text": "🔄 Refresh 24h Trending", "callback_data": "fetch_trending"}]
-    ]
-    await send_telegram_message(session, report, inline_keyboard, target_chat_id=chat_id)
+    lines = ["🔥 **TOP TRENDING MEMECOINS** 🔥\n", "⚡ **SOLANA:**"]
+    if not trending_sol:
+        lines.append("  _No active trending tokens found._")
+    else:
+        for idx, (mint, url) in enumerate(trending_sol, 1):
+            lines.append(f"{idx}. `{mint}`\n   [DexScreener Link]({url})")
 
-async def send_status_report(session, chat_id):
-    status_msg = (
-        f"📊 *OmniChain Sniper Status Report* 📊\n\n"
-        f"• *Supported Chains:* Solana, Robinhood\n"
-        f"• *Tracked Tokens:* {len(tracked_tokens)}\n"
-        f"• *Incubation Watchlist:* {len(incubation_tokens)}\n"
-        f"• *Processed Tokens:* {len(processed_txs)}\n"
-        f"• *Engine State:* 🟢 Active & Polling\n\n"
+    lines.append("\n🏹 **ROBINHOOD:**")
+    if not trending_rh:
+        lines.append("  _No active trending tokens found._")
+    else:
+        for idx, (mint, url) in enumerate(trending_rh, 1):
+            lines.append(f"{idx}. `{mint}`\n   [DexScreener Link]({url})")
+
+    lines.append("\n6767")
+    await send_telegram_message(session, "\n".join(lines), target_chat_id=chat_id)
+
+async def handle_status_command(session, chat_id):
+    status_text = (
+        f"📊 **OmniChain Sniper Engine Status** 📊\n\n"
+        f"• **Supported Chains:** Solana, Robinhood\n"
+        f"• **Tracked Tokens:** {len(tracked_tokens)}\n"
+        f"• **Incubation Watchlist:** {len(incubation_tokens)}\n"
+        f"• **Processed Tokens:** {len(processed_txs)}\n"
+        f"• **Engine State:** 🟢 Active & Scanning\n\n"
         f"6767"
     )
-    inline_keyboard = [[{"text": "🔄 Refresh Status", "callback_data": "fetch_status"}]]
-    await send_telegram_message(session, status_msg, inline_keyboard, target_chat_id=chat_id)
+    await send_telegram_message(session, status_text, target_chat_id=chat_id)
 
-async def telegram_polling_loop(session):
-    global last_update_id
-    print("[+] Telegram command listener active (/start, /trending, /status)")
+async def telegram_command_listener(session):
+    offset = 0
+    print("[+] Telegram command listener initialized. Send /trending or /status in chat.")
     while True:
         try:
-            url = f"{TELEGRAM_API}/getUpdates?offset={last_update_id + 1}&timeout=10"
+            url = f"{TELEGRAM_API}/getUpdates?offset={offset}&timeout=10"
             async with session.get(url, timeout=12) as res:
                 if res.status == 200:
                     data = await res.json()
                     for update in data.get("result", []):
-                        last_update_id = update["update_id"]
-                        
-                        if "message" in update:
-                            msg = update["message"]
-                            chat_id = msg["chat"]["id"]
-                            text = msg.get("text", "").strip()
+                        offset = update["update_id"] + 1
+                        message = update.get("message")
+                        if message and "text" in message:
+                            text = message["text"].strip().lower()
+                            chat_id = message["chat"]["id"]
                             
-                            if text in ["/start", "/menu", "/help"]:
-                                await send_control_dashboard(session, chat_id)
-                            elif text in ["/trending", "/top", "🔥 24h Trending", "🔥 Trending"]:
-                                await send_24h_trending_report(session, chat_id)
-                            elif text in ["/status", "📊 Status"]:
-                                await send_status_report(session, chat_id)
-
-                        elif "callback_query" in update:
-                            cb = update["callback_query"]
-                            chat_id = cb["message"]["chat"]["id"]
-                            cb_data = cb.get("data", "")
-                            
-                            if cb_data == "fetch_trending":
-                                await send_24h_trending_report(session, chat_id)
-                            elif cb_data == "fetch_status":
-                                await send_status_report(session, chat_id)
+                            if text in ["/trending", "/top"]:
+                                await handle_trending_command(session, chat_id)
+                            elif text in ["/status", "/info"]:
+                                await handle_status_command(session, chat_id)
+                            elif text in ["/start", "/help", "/menu"]:
+                                help_msg = (
+                                    "🤖 **OmniChain Sniper Commands:**\n\n"
+                                    "• `/trending` - Live trending tokens on Solana & Robinhood\n"
+                                    "• `/status` - Engine status & tracked metrics"
+                                )
+                                await send_telegram_message(session, help_msg, target_chat_id=chat_id)
         except Exception as e:
-            print(f"Telegram polling loop error: {e}")
-        await asyncio.sleep(1)
+            print(f"Command listener error: {e}")
+        await asyncio.sleep(2)
 
 async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
     try:
@@ -298,9 +238,15 @@ async def send_pro_channel_alert(session, token_data):
     if token_data.get("twitter"):
         row2.append({"text": "🌙 X Profile", "url": token_data["twitter"]})
         
+    row_trending = [
+        {"text": "🔥 Solana Trending", "url": "https://dexscreener.com/solana"},
+        {"text": "🏹 Robinhood Trending", "url": "https://dexscreener.com/robinhood"}
+    ]
+
     keyboard = [row1]
     if row2:
         keyboard.append(row2)
+    keyboard.append(row_trending)
     
     image_url = token_data.get("image")
     if image_url and image_url.startswith("http"):
@@ -612,7 +558,7 @@ async def run_pro_omnichain_sniper():
             deployer_wallet_tracking_loop(session),
             mempool_sniffing_loop(session),
             social_alpha_scraping_loop(session),
-            telegram_polling_loop(session)
+            telegram_command_listener(session)
         )
 
 if __name__ == "__main__":

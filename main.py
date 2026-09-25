@@ -8,7 +8,6 @@ TELEGRAM_BOT_TOKEN = "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 TELEGRAM_CHAT_ID = "7113872351"
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Both chains supported for base engine, new strategy is Solana only
 SUPPORTED_CHAINS = ["solana", "robinhood"]
 DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_RECENT_PROFILES = "https://api.dexscreener.com/token-profiles/recent-updates/v1"
@@ -57,7 +56,7 @@ def check_and_reset_daily_quota():
         daily_strategy_state["date"] = today_str
         daily_strategy_state["count"] = 0
         return True
-    return daily_strategy_state["count"] < 5
+    return daily_strategy_state["count"] < 20
 
 async def send_telegram_message(session, text, inline_keyboard=None):
     try:
@@ -85,7 +84,6 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5) as response:
             if response.status != 200:
-                print(f"Photo send rejected by Telegram, falling back to text.")
                 await send_telegram_message(session, caption, inline_keyboard)
     except Exception as e:
         print(f"Telegram photo error: {e}")
@@ -95,13 +93,14 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
         volume_h1 = float(pair_data.get("volume", {}).get("h1", 0) or 0)
         txns_h1 = pair_data.get("txns", {}).get("h1", {})
         buys_h1 = int(txns_h1.get("buys", 0) or 0)
-        sells_h1 = int(txns_h1.get("sells", 0) or 0)
         
-        if volume_h1 < 2000 or buys_h1 < 3:
-            return False
-
         if chain_id == "solana":
-            async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=8) as res:
+            if volume_h1 < 1000 and buys_h1 < 2:
+                txns_h24 = pair_data.get("txns", {}).get("h24", {})
+                if int(txns_h24.get("buys", 0) or 0) < 3:
+                    return False
+
+            async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=5) as res:
                 if res.status == 200:
                     data = await res.json()
                     risk_score = data.get("score", 999)
@@ -114,30 +113,27 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     is_mintable = any("mint" in str(r.get("name", "")).lower() for r in risks if r.get("score", 0) > 0)
                     is_freezable = any("freeze" in str(r.get("name", "")).lower() for r in risks if r.get("score", 0) > 0)
                     
-                    if risk_score <= 1000 and not is_mintable and not is_freezable and concentrated_supply < 50:
+                    if risk_score <= 1500 and not is_mintable and not is_freezable and concentrated_supply < 60:
                         return True
                 else:
                     txns = pair_data.get("txns", {}).get("h24", {})
-                    buys = int(txns.get("buys", 0) or 0)
-                    if buys >= 10:
+                    if int(txns.get("buys", 0) or 0) >= 3:
                         return True
+                        
         elif chain_id == "robinhood":
             lp_info = pair_data.get("liquidity", {})
-            if not lp_info or not isinstance(lp_info, dict):
-                return False
-            raw_usd = lp_info.get("usd", 0)
-            lp_usd = float(raw_usd) if raw_usd is not None else 0.0
-            if lp_usd < 15000:
-                return False
-            txns = pair_data.get("txns", {}).get("h24", {})
-            if (int(txns.get("buys", 0) or 0) + int(txns.get("sells", 0) or 0)) >= 30:
+            lp_usd = float(lp_info.get("usd", 0) or 0) if isinstance(lp_info, dict) else 0.0
+            txns_h24 = pair_data.get("txns", {}).get("h24", {})
+            total_txns = int(txns_h24.get("buys", 0) or 0) + int(txns_h24.get("sells", 0) or 0)
+            
+            if lp_usd >= 3000 or total_txns >= 5 or volume_h1 > 300:
                 return True
+            return False
     except Exception as e:
         print(f"Advanced intelligence check error ({chain_id}): {e}")
-        if chain_id == "solana":
-            txns = pair_data.get("txns", {}).get("h24", {})
-            if int(txns.get("buys", 0) or 0) >= 10:
-                return True
+        txns = pair_data.get("txns", {}).get("h24", {})
+        if int(txns.get("buys", 0) or 0) >= 3:
+            return True
     return False
 
 async def send_pro_channel_alert(session, token_data):
@@ -181,10 +177,10 @@ async def send_solana_200k_strategy_alert(session, token_data):
     caption = (
         f"🎯 **SOLANA $200K TARGET STRATEGY ENTRY** 🎯\n\n"
         f"🪙 **Token:** {token_data['name']} (${token_data['symbol']})\n"
-        f"📈 **Entry Market Cap:** ${token_data['mc']:,}\n"
+        f"📈 **Entry Market Cap:** ${token_data['mc']:,} ($10k-$20k Range!)\n"
         f"🎯 **Target Exit:** $200,000 MC\n"
         f"📋 **CA:** `{token_data['address']}`\n\n"
-        f"🔥 *Daily 5-Solana Strategy Slot Locked, baby. 6767*"
+        f"🔥 *Daily 20-Solana Strategy Slot Locked, baby. 6767*"
     )
     keyboard = [[{"text": "📈 Chart", "url": token_data["url"]}]]
     if token_data.get("image") and token_data["image"].startswith("http"):
@@ -208,7 +204,6 @@ async def check_solana_200k_milestones(session):
                     pairs = json_data.get("pairs", [])
                     if pairs:
                         current_mc = pairs[0].get("marketCap") or pairs[0].get("fdv") or 0
-                        
                         if current_mc >= 200000:
                             solana_200k_tracked[mint_address]["target_hit"] = True
                             updated = True
@@ -311,14 +306,6 @@ async def incubation_checker_loop(session):
 
                                 async with processing_lock:
                                     del incubation_tokens[mint_address]
-                                    processed_txs.add(mint_address)
-                                    tracked_tokens[mint_address] = {
-                                        "chain": chain,
-                                        "initial_mc": current_mc,
-                                        "name": token_name,
-                                        "symbol": token_symbol,
-                                        "milestone_sent": False
-                                    }
                                 updated = True
                                 print(f"[+] INCUBATION GRADUATED: {token_name} at MC${current_mc:,} [6767]")
                                 
@@ -341,7 +328,6 @@ async def incubation_checker_loop(session):
                             elif current_mc > 150000:
                                 async with processing_lock:
                                     del incubation_tokens[mint_address]
-                                    processed_txs.add(mint_address)
                                 updated = True
             except Exception as e:
                 print(f"Incubation check error for {mint_address}: {e}")
@@ -357,9 +343,14 @@ async def process_token_discovery(session, chain, raw_mint):
     
     mint_address = raw_mint.strip().lower()
 
+    # Atomically claim the token immediately to prevent double-send race conditions across loops
     async with processing_lock:
-        if mint_address in tracked_tokens or mint_address in incubation_tokens or mint_address in processed_txs or mint_address in solana_200k_tracked:
+        if (mint_address in tracked_tokens or 
+            mint_address in incubation_tokens or 
+            mint_address in processed_txs or 
+            mint_address in solana_200k_tracked):
             return
+        processed_txs.add(mint_address)
     
     try:
         async with session.get(DEXSCREENER_TOKEN + mint_address, timeout=5) as res:
@@ -374,14 +365,11 @@ async def process_token_discovery(session, chain, raw_mint):
             market_cap = p.get("marketCap") or p.get("fdv") or 0
             
             if market_cap > 150000 and (chain != "solana" or market_cap >= 200000):
-                async with processing_lock:
-                    processed_txs.add(mint_address)
                 return
             
             passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p, market_cap)
             if passes_intel:
-                # NEW SOLANA $200K STRATEGY (Solana only, market cap below $200K, max 5 per day)
-                if chain == "solana" and market_cap < 200000:
+                if chain == "solana" and 10000 <= market_cap <= 20000:
                     async with processing_lock:
                         if check_and_reset_daily_quota() and mint_address not in solana_200k_tracked:
                             daily_strategy_state["count"] += 1
@@ -398,9 +386,8 @@ async def process_token_discovery(session, chain, raw_mint):
                                 "symbol": token_symbol,
                                 "target_hit": False
                             }
-                            processed_txs.add(mint_address)
                             save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
-                            print(f"[+] SOLANA 200K STRATEGY ACTIVE ({daily_strategy_state['count']}/5): {token_name} at MC${market_cap:,} [6767]")
+                            print(f"[+] SOLANA 200K STRATEGY ACTIVE ({daily_strategy_state['count']}/20): {token_name} at MC${market_cap:,} [6767]")
                             
                             await send_solana_200k_strategy_alert(session, {
                                 "chain": chain,
@@ -411,6 +398,7 @@ async def process_token_discovery(session, chain, raw_mint):
                                 "url": url,
                                 "image": image_url
                             })
+                            return
 
                 if market_cap < 50000:
                     async with processing_lock:
@@ -450,7 +438,6 @@ async def process_token_discovery(session, chain, raw_mint):
                 volume = p.get("volume", {}).get("h24", 0)
 
                 async with processing_lock:
-                    processed_txs.add(mint_address)
                     tracked_tokens[mint_address] = {
                         "chain": chain,
                         "initial_mc": market_cap,
@@ -555,7 +542,7 @@ async def social_alpha_scraping_loop(session):
         await asyncio.sleep(12)
 
 async def run_pro_omnichain_sniper():
-    print("Elite Pro-Styled OmniChain Sniper + Solana Daily 5x $200K Strategy fully active, baby. 6767.")
+    print("Elite Pro-Styled OmniChain Sniper + Solana Daily 20x $200K Strategy fully active, baby. 6767.")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             dexscreener_dual_feed_loop(session),

@@ -7,7 +7,7 @@ import sys
 import aiohttp
 from datetime import datetime, timezone
 
-# --- SINGLE INSTANCE PROCESS LOCK (Prevents duplicate bot instances) ---
+# --- SINGLE INSTANCE PROCESS LOCK ---
 try:
   lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
   lock_socket.bind(("127.0.0.1", 65432))
@@ -18,30 +18,22 @@ except socket.error:
   )
   sys.exit(0)
 
-# Environment variable fallback with default keys
+# Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN", "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 )
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7113872351")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-SUPPORTED_CHAINS = ["solana", "robinhood"]
-DEXSCREENER_LATEST_PROFILES = (
-    "https://api.dexscreener.com/token-profiles/latest/v1"
-)
-DEXSCREENER_RECENT_PROFILES = (
-    "https://api.dexscreener.com/token-profiles/recent-updates/v1"
-)
+DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
+DEXSCREENER_RECENT_PROFILES = "https://api.dexscreener.com/token-profiles/recent-updates/v1"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
-DEXSCREENER_BOOSTED_LATEST = (
-    "https://api.dexscreener.com/token-boosts/latest/v1"
-)
+DEXSCREENER_BOOSTED_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
 DEXSCREENER_BOOSTED_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
 PERSISTENCE_FILE = "processed_tokens.json"
-
 
 def load_persistence():
   if os.path.exists(PERSISTENCE_FILE):
@@ -58,7 +50,6 @@ def load_persistence():
     except Exception as e:
       print(f"Error loading persistence file: {e}")
   return set(), {}, {}, {}, {"date": "", "count": 0}
-
 
 def save_persistence(
     processed_set,
@@ -82,7 +73,6 @@ def save_persistence(
   except Exception as e:
     print(f"Error saving persistence file: {e}")
 
-
 (
     processed_txs,
     tracked_tokens,
@@ -90,11 +80,10 @@ def save_persistence(
     solana_200k_tracked,
     daily_strategy_state,
 ) = load_persistence()
-alerted_mints = set(tracked_tokens.keys()).union(
-    set(solana_200k_tracked.keys())
-)
-processing_lock = asyncio.Lock()
 
+alerted_mints = set(tracked_tokens.keys()).union(set(solana_200k_tracked.keys()))
+failed_cache = {}
+processing_lock = asyncio.Lock()
 
 def check_and_reset_daily_quota():
   today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -104,6 +93,14 @@ def check_and_reset_daily_quota():
     return True
   return daily_strategy_state.get("count", 0) < 5
 
+def get_mapped_chain(chain_id):
+  """Maps raw DexScreener chain IDs to our supported ecosystems."""
+  chain_id = str(chain_id).lower()
+  if chain_id in ["ethereum", "base", "arbitrum", "robinhood"]:
+    return "robinhood"
+  elif chain_id == "solana":
+    return "solana"
+  return None
 
 async def send_telegram_message(
     session, text, inline_keyboard=None, reply_keyboard=None, chat_id=None
@@ -116,7 +113,6 @@ async def send_telegram_message(
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-
     if reply_keyboard:
       payload["reply_markup"] = {
           "keyboard": reply_keyboard,
@@ -126,13 +122,10 @@ async def send_telegram_message(
     elif inline_keyboard:
       payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
 
-    async with session.post(
-        f"{TELEGRAM_API}/sendMessage", json=payload, timeout=8
-    ) as response:
+    async with session.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=8):
       pass
   except Exception as e:
     print(f"Telegram dispatch error: {e}")
-
 
 async def send_telegram_photo(
     session, photo_url, caption, inline_keyboard=None, chat_id=None
@@ -147,37 +140,25 @@ async def send_telegram_photo(
     }
     if inline_keyboard:
       payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-    async with session.post(
-        f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=8
-    ) as response:
+    async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=8) as response:
       if response.status != 200:
-        await send_telegram_message(
-            session, caption, inline_keyboard, chat_id=target_chat
-        )
-  except Exception as e:
-    await send_telegram_message(
-        session, caption, inline_keyboard, chat_id=target_chat
-    )
-
+        await send_telegram_message(session, caption, inline_keyboard, chat_id=target_chat)
+  except Exception:
+    await send_telegram_message(session, caption, inline_keyboard, chat_id=target_chat)
 
 async def answer_callback_query(session, callback_id, text="Processing..."):
   try:
     payload = {"callback_query_id": callback_id, "text": text}
-    async with session.post(
-        f"{TELEGRAM_API}/answerCallbackQuery", json=payload, timeout=5
-    ):
+    async with session.post(f"{TELEGRAM_API}/answerCallbackQuery", json=payload, timeout=5):
       pass
   except Exception as e:
     print(f"Callback answer error: {e}")
 
-
 def get_main_menu_inline_keyboard():
   return [[{"text": "🚀 Trending Memecoins", "callback_data": "trending_all"}]]
 
-
 def get_persistent_reply_keyboard():
   return [["🚀 Trending Memecoins"]]
-
 
 async def send_main_menu(session, chat_id=None):
   menu_prompt = (
@@ -197,7 +178,6 @@ async def send_main_menu(session, chat_id=None):
       chat_id=chat_id,
   )
 
-
 async def fetch_token_detail(session, addr):
   try:
     async with session.get(f"{DEXSCREENER_TOKEN}{addr}", timeout=5) as res:
@@ -205,19 +185,13 @@ async def fetch_token_detail(session, addr):
         t_data = await res.json()
         pairs = t_data.get("pairs") or []
         if pairs:
-          return max(
-              pairs,
-              key=lambda x: float((x.get("volume") or {}).get("h24") or 0),
-          )
+          return max(pairs, key=lambda x: float((x.get("volume") or {}).get("h24") or 0))
   except Exception:
     pass
   return None
 
-
 async def fetch_top_memecoins_data(session, chain_name):
-  """Fetches top boosted/volume pairs for a given network chain in parallel."""
   pairs_to_check = []
-
   try:
     async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=10) as res:
       if res.status == 200:
@@ -235,9 +209,7 @@ async def fetch_top_memecoins_data(session, chain_name):
 
     if len(pairs_to_check) < 5:
       fallback_query = "pepe" if chain_name == "robinhood" else "pump"
-      async with session.get(
-          f"{DEXSCREENER_SEARCH}{fallback_query}", timeout=10
-      ) as res:
+      async with session.get(f"{DEXSCREENER_SEARCH}{fallback_query}", timeout=10) as res:
         if res.status == 200:
           data = await res.json()
           for p in data.get("pairs") or []:
@@ -253,36 +225,23 @@ async def fetch_top_memecoins_data(session, chain_name):
                 pairs_to_check.append(base_addr)
 
     unique_addrs = list(dict.fromkeys(pairs_to_check[:15]))
-    results = await asyncio.gather(
-        *[fetch_token_detail(session, addr) for addr in unique_addrs]
-    )
+    results = await asyncio.gather(*[fetch_token_detail(session, addr) for addr in unique_addrs])
     token_details = [r for r in results if r is not None]
-
-    token_details.sort(
-        key=lambda x: float((x.get("volume") or {}).get("h24") or 0),
-        reverse=True,
-    )
+    token_details.sort(key=lambda x: float((x.get("volume") or {}).get("h24") or 0), reverse=True)
     return token_details
   except Exception as e:
     print(f"Error fetching top memecoins for {chain_name}: {e}")
     return []
-
 
 async def fetch_top_5_memecoins_report(session, chain_name):
   top_tokens = await fetch_top_memecoins_data(session, chain_name)
   top_5 = top_tokens[:5]
 
   if not top_5:
-    return (
-        "⚠️ <b>Notice:</b> No high-volume"
-        f" {chain_name.upper()} memecoins detected right now."
-    )
+    return f"⚠️ <b>Notice:</b> No high-volume {chain_name.upper()} memecoins detected right now."
 
   header_icon = "🔥" if chain_name == "solana" else "🏹"
-  output = (
-      f"{header_icon} <b>TOP 5 {chain_name.upper()} MEMECOINS (BY 24H"
-      f" VOLUME)</b> {header_icon}\n\n"
-  )
+  output = f"{header_icon} <b>TOP 5 {chain_name.upper()} MEMECOINS (BY 24H VOLUME)</b> {header_icon}\n\n"
 
   for idx, token in enumerate(top_5, 1):
     base = token.get("baseToken") or {}
@@ -292,7 +251,6 @@ async def fetch_top_5_memecoins_report(session, chain_name):
     vol = float((token.get("volume") or {}).get("h24") or 0)
     price_change = float((token.get("priceChange") or {}).get("h24") or 0)
     pair_url = token.get("url", "https://dexscreener.com")
-
     change_sign = "+" if price_change >= 0 else ""
 
     output += (
@@ -305,7 +263,6 @@ async def fetch_top_5_memecoins_report(session, chain_name):
 
   return output
 
-
 async def fetch_all_trending_report(session):
   sol_report = await fetch_top_5_memecoins_report(session, "solana")
   rh_report = await fetch_top_5_memecoins_report(session, "robinhood")
@@ -317,10 +274,7 @@ async def fetch_all_trending_report(session):
       "💎 <i>Live Intelligence Powered by OmniChain Engine 6767</i>"
   )
 
-
-async def advanced_intelligence_filter(
-    session, chain_id, mint_address, pair_data, market_cap
-):
+async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
   try:
     volume_data = pair_data.get("volume") or {}
     volume_h1 = float(volume_data.get("h1") or 0)
@@ -332,43 +286,32 @@ async def advanced_intelligence_filter(
       return False
 
     if chain_id == "solana":
-      async with session.get(
-          f"{RUGCHECK_API}{mint_address}/report", timeout=8
-      ) as res:
-        if res.status == 200:
-          data = await res.json()
-          risk_score = data.get("score", 999)
-          risks = data.get("risks") or []
-          top_holders = data.get("topHolders") or []
-          user_holders = (
-              top_holders[1:] if len(top_holders) > 1 else top_holders
-          )
-          concentrated_supply = sum(
-              [float(h.get("pct") or 0) for h in user_holders[:5]]
-          )
+      try:
+        async with session.get(f"{RUGCHECK_API}{mint_address}/report", timeout=8) as res:
+          if res.status == 200:
+            data = await res.json()
+            risk_score = data.get("score", 999)
+            risks = data.get("risks") or []
+            top_holders = data.get("topHolders") or []
+            user_holders = top_holders[1:] if len(top_holders) > 1 else top_holders
+            concentrated_supply = sum([float(h.get("pct") or 0) for h in user_holders[:5]])
 
-          is_mintable = any(
-              "mint" in str(r.get("name", "")).lower()
-              for r in risks
-              if (r.get("score") or 0) > 0
-          )
-          is_freezable = any(
-              "freeze" in str(r.get("name", "")).lower()
-              for r in risks
-              if (r.get("score") or 0) > 0
-          )
+            is_mintable = any("mint" in str(r.get("name", "")).lower() for r in risks if (r.get("score") or 0) > 0)
+            is_freezable = any("freeze" in str(r.get("name", "")).lower() for r in risks if (r.get("score") or 0) > 0)
 
-          if (
-              risk_score <= 1000
-              and not is_mintable
-              and not is_freezable
-              and concentrated_supply < 50
-          ):
-            return True
-        else:
-          txns_h24 = txns_data.get("h24") or {}
-          if int(txns_h24.get("buys") or 0) >= 10:
-            return True
+            if (risk_score <= 1000 and not is_mintable and not is_freezable and concentrated_supply < 50):
+              return True
+            return False
+          else:
+            txns_h24 = txns_data.get("h24") or {}
+            if int(txns_h24.get("buys") or 0) >= 10:
+              return True
+            return False
+      except Exception as e:
+        txns_h24 = txns_data.get("h24") or {}
+        if int(txns_h24.get("buys") or 0) >= 10:
+          return True
+        return False
 
     elif chain_id == "robinhood":
       lp_info = pair_data.get("liquidity") or {}
@@ -379,18 +322,15 @@ async def advanced_intelligence_filter(
         return False
 
       txns_h24 = txns_data.get("h24") or {}
-      total_txns = int(txns_h24.get("buys") or 0) + int(
-          txns_h24.get("sells") or 0
-      )
+      total_txns = int(txns_h24.get("buys") or 0) + int(txns_h24.get("sells") or 0)
       if total_txns >= 10:
         return True
+      return False
 
   except Exception as e:
-    print(f"Advanced intelligence check error ({chain_id}): {e}")
-    return True
+    return False
 
   return False
-
 
 async def send_pro_channel_alert(session, token_data):
   address = token_data["address"]
@@ -407,8 +347,7 @@ async def send_pro_channel_alert(session, token_data):
       f" (${html.escape(str(token_data['symbol']))}) Sweet-Spot Alert!</b>"
       " 🚀\n\n"
       f"🌐 <b>Network:</b> {chain_name}\n"
-      f"🟢 <b>1H Activity:</b> {token_data['buys']} Buys | {token_data['sells']}"
-      " Sells\n"
+      f"🟢 <b>1H Activity:</b> {token_data['buys']} Buys | {token_data['sells']} Sells\n"
       f"📊 <b>24h Volume:</b> ${token_data['volume']:,.0f}\n"
       f"📈 <b>Market Cap:</b> ${token_data['mc']:,}\n"
       f"🎯 <b>Target Exit (10x):</b> ${target_mc:,}\n\n"
@@ -416,10 +355,7 @@ async def send_pro_channel_alert(session, token_data):
       "💎 <i>Elite micro-cap runner engine active. 6767</i>"
   )
 
-  row1 = [
-      {"text": "📈 Chart", "url": token_data["url"]},
-      {"text": "⚡ Buy", "url": token_data["url"]},
-  ]
+  row1 = [{"text": "📈 Chart", "url": token_data["url"]}, {"text": "⚡ Buy", "url": token_data["url"]}]
   row2 = []
   if token_data.get("website"):
     row2.append({"text": "🌐 Website", "url": token_data["website"]})
@@ -435,7 +371,6 @@ async def send_pro_channel_alert(session, token_data):
     await send_telegram_photo(session, image_url, caption, keyboard)
   else:
     await send_telegram_message(session, caption, keyboard)
-
 
 async def send_solana_200k_strategy_alert(session, token_data):
   address = token_data["address"]
@@ -459,19 +394,15 @@ async def send_solana_200k_strategy_alert(session, token_data):
   else:
     await send_telegram_message(session, caption, keyboard)
 
-
 async def check_solana_200k_milestones(session):
   if not solana_200k_tracked:
     return
-
   updated = False
   for mint_address, data in list(solana_200k_tracked.items()):
     if data.get("target_hit"):
       continue
     try:
-      async with session.get(
-          f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5
-      ) as res:
+      async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
         if res.status == 200:
           json_data = await res.json()
           pairs = json_data.get("pairs") or []
@@ -482,41 +413,28 @@ async def check_solana_200k_milestones(session):
               updated = True
               caption = (
                   "💰 <b>SOLANA $200K TARGET REACHED & SOLD!</b> 💰\n\n"
-                  f"🪙 <b>Token:</b> {html.escape(str(data['name']))}"
-                  f" (${html.escape(str(data['symbol']))})\n"
+                  f"🪙 <b>Token:</b> {html.escape(str(data['name']))} (${html.escape(str(data['symbol']))})\n"
                   f"💵 <b>Initial Entry MC:</b> ${data['initial_mc']:,}\n"
-                  f"🚀 <b>Target Hit MC:</b> ${current_mc:,} (>= $200K"
-                  " Target!)\n"
+                  f"🚀 <b>Target Hit MC:</b> ${current_mc:,} (>= $200K Target!)\n"
                   f"🔑 <b>CA:</b> <code>{mint_address}</code>\n\n"
-                  "🛡️ <i>Dump secured, baby. Strategy executed"
-                  " successfully.</i> 6767"
+                  "🛡️ <i>Dump secured, baby. Strategy executed successfully.</i> 6767"
               )
               await send_telegram_message(session, caption)
-    except Exception as e:
-      print(f"Solana 200k milestone error: {e}")
+    except Exception:
+      pass
 
   if updated:
-    save_persistence(
-        processed_txs,
-        tracked_tokens,
-        incubation_tokens,
-        solana_200k_tracked,
-        daily_strategy_state,
-    )
-
+    save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
 
 async def check_token_milestones(session):
   if not tracked_tokens:
     return
-
   updated = False
   for mint_address, data in list(tracked_tokens.items()):
     if data.get("milestone_sent"):
       continue
     try:
-      async with session.get(
-          f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5
-      ) as res:
+      async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
         if res.status == 200:
           json_data = await res.json()
           pairs = json_data.get("pairs") or []
@@ -528,26 +446,18 @@ async def check_token_milestones(session):
               updated = True
               caption = (
                   "🎉 <b>10X MILESTONE LOCKED!</b> 🎉\n\n"
-                  f"🪙 <b>Token:</b> {html.escape(str(data['name']))}"
-                  f" (${html.escape(str(data['symbol']))})\n"
+                  f"🪙 <b>Token:</b> {html.escape(str(data['name']))} (${html.escape(str(data['symbol']))})\n"
                   f"💵 <b>Initial Call:</b> ${initial_mc:,}\n"
                   f"🚀 <b>Current MC:</b> ${current_mc:,} (10x+ Hit!)\n"
                   f"🔑 <b>CA:</b> <code>{mint_address}</code>\n\n"
                   "🛡️ <i>Target secured, baby.</i> 6767"
               )
               await send_telegram_message(session, caption)
-    except Exception as e:
-      print(f"Milestone tracking error: {e}")
+    except Exception:
+      pass
 
   if updated:
-    save_persistence(
-        processed_txs,
-        tracked_tokens,
-        incubation_tokens,
-        solana_200k_tracked,
-        daily_strategy_state,
-    )
-
+    save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
 
 async def incubation_checker_loop(session):
   while True:
@@ -559,9 +469,7 @@ async def incubation_checker_loop(session):
       updated = False
       for mint_address, data in list(incubation_tokens.items()):
         try:
-          async with session.get(
-              f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5
-          ) as res:
+          async with session.get(f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5) as res:
             if res.status == 200:
               json_data = await res.json()
               pairs = json_data.get("pairs") or []
@@ -574,15 +482,11 @@ async def incubation_checker_loop(session):
                   base_token = p.get("baseToken") or {}
                   token_name = base_token.get("name", "Unknown")
                   token_symbol = base_token.get("symbol", "???")
-                  url = p.get(
-                      "url", f"https://dexscreener.com/{chain}/{mint_address}"
-                  )
+                  url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
                   image_url = (p.get("info") or {}).get("imageUrl")
-
                   info = p.get("info") or {}
                   websites = info.get("websites") or []
                   socials = info.get("socials") or []
-
                   website_url = websites[0]["url"] if websites else None
                   telegram_url = None
                   twitter_url = None
@@ -592,11 +496,7 @@ async def incubation_checker_loop(session):
                     surl = str(s.get("url", ""))
                     if "telegram" in stype or "t.me" in surl:
                       telegram_url = surl
-                    elif (
-                        "twitter" in stype
-                        or "x.com" in surl
-                        or "twitter.com" in surl
-                    ):
+                    elif "twitter" in stype or "x.com" in surl or "twitter.com" in surl:
                       twitter_url = surl
 
                   txns_h1 = (p.get("txns") or {}).get("h1") or {}
@@ -635,37 +535,36 @@ async def incubation_checker_loop(session):
                           "twitter": twitter_url,
                       },
                   )
-
                 elif current_mc > 300000:
                   async with processing_lock:
                     if mint_address in incubation_tokens:
                       del incubation_tokens[mint_address]
                     processed_txs.add(mint_address)
                   updated = True
-        except Exception as e:
-          print(f"Incubation check error for {mint_address}: {e}")
+        except Exception:
+          pass
 
       if updated:
-        save_persistence(
-            processed_txs,
-            tracked_tokens,
-            incubation_tokens,
-            solana_200k_tracked,
-            daily_strategy_state,
-        )
-    except Exception as outer_e:
-      print(f"Incubation loop outer error: {outer_e}")
-
+        save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
+    except Exception:
+      pass
     await asyncio.sleep(10)
-
 
 async def process_token_discovery(session, chain, raw_mint):
   if not raw_mint:
     return
 
   mint_address = raw_mint.strip().lower()
+  now = datetime.now().timestamp()
 
   async with processing_lock:
+    # Cleanup old failed cache (prevent memory leaks)
+    if len(failed_cache) > 2000:
+      cutoff = now - 300
+      for k in list(failed_cache.keys()):
+        if failed_cache[k] < cutoff:
+          del failed_cache[k]
+
     if (
         mint_address in tracked_tokens
         or mint_address in incubation_tokens
@@ -674,7 +573,8 @@ async def process_token_discovery(session, chain, raw_mint):
         or mint_address in alerted_mints
     ):
       return
-    processed_txs.add(mint_address)
+    if mint_address in failed_cache and (now - failed_cache[mint_address] < 300):
+      return
 
   try:
     async with session.get(DEXSCREENER_TOKEN + mint_address, timeout=5) as res:
@@ -688,134 +588,120 @@ async def process_token_discovery(session, chain, raw_mint):
       p = pairs[0]
       market_cap = p.get("marketCap") or p.get("fdv") or 0
 
-      if market_cap > 300000:
+      # Temporarily ignore tokens with 0 MC (too new) or permanently ignore if >300k
+      if market_cap > 300000 or market_cap == 0:
+        async with processing_lock:
+          failed_cache[mint_address] = now
         return
 
-      passes_intel = await advanced_intelligence_filter(
-          session, chain, mint_address, p, market_cap
-      )
-      if passes_intel:
-        if chain == "solana" and market_cap < 200000:
-          async with processing_lock:
-            if (
-                check_and_reset_daily_quota()
-                and mint_address not in solana_200k_tracked
-            ):
-              daily_strategy_state["count"] += 1
-              base_token = p.get("baseToken") or {}
-              token_name = base_token.get("name", "Unknown")
-              token_symbol = base_token.get("symbol", "???")
-              url = p.get(
-                  "url", f"https://dexscreener.com/{chain}/{mint_address}"
-              )
-              image_url = (p.get("info") or {}).get("imageUrl")
-
-              solana_200k_tracked[mint_address] = {
-                  "chain": chain,
-                  "initial_mc": market_cap,
-                  "name": token_name,
-                  "symbol": token_symbol,
-                  "target_hit": False,
-              }
-              save_persistence(
-                  processed_txs,
-                  tracked_tokens,
-                  incubation_tokens,
-                  solana_200k_tracked,
-                  daily_strategy_state,
-              )
-
-              await send_solana_200k_strategy_alert(
-                  session,
-                  {
-                      "chain": chain,
-                      "name": token_name,
-                      "symbol": token_symbol,
-                      "address": mint_address,
-                      "mc": market_cap,
-                      "url": url,
-                      "image": image_url,
-                  },
-              )
-              return
-
-        if market_cap < 50000:
-          async with processing_lock:
-            incubation_tokens[mint_address] = {"chain": chain}
-          save_persistence(
-              processed_txs,
-              tracked_tokens,
-              incubation_tokens,
-              solana_200k_tracked,
-              daily_strategy_state,
-          )
-          return
-
-        image_url = (p.get("info") or {}).get("imageUrl")
-        base_token = p.get("baseToken") or {}
-        token_name = base_token.get("name", "Unknown")
-        token_symbol = base_token.get("symbol", "???")
-        url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
-
-        info = p.get("info") or {}
-        websites = info.get("websites") or []
-        socials = info.get("socials") or []
-
-        website_url = websites[0]["url"] if websites else None
-        telegram_url = None
-        twitter_url = None
-
-        for s in socials:
-          stype = str(s.get("type", "")).lower()
-          surl = str(s.get("url", ""))
-          if "telegram" in stype or "t.me" in surl:
-            telegram_url = surl
-          elif "twitter" in stype or "x.com" in surl or "twitter.com" in surl:
-            twitter_url = surl
-
-        txns_h1 = (p.get("txns") or {}).get("h1") or {}
-        buys = txns_h1.get("buys", 0)
-        sells = txns_h1.get("sells", 0)
-        volume = (p.get("volume") or {}).get("h24", 0)
-
+      passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p, market_cap)
+      
+      # Set aside failed tokens for 5 mins instead of permanent blacklisting
+      if not passes_intel:
         async with processing_lock:
-          tracked_tokens[mint_address] = {
-              "chain": chain,
-              "initial_mc": market_cap,
-              "name": token_name,
-              "symbol": token_symbol,
-              "milestone_sent": False,
-          }
+          failed_cache[mint_address] = now
+        return
 
-        save_persistence(
-            processed_txs,
-            tracked_tokens,
-            incubation_tokens,
-            solana_200k_tracked,
-            daily_strategy_state,
-        )
+      # ONLY permanently process if it passes filter
+      async with processing_lock:
+        processed_txs.add(mint_address)
 
-        await send_pro_channel_alert(
-            session,
-            {
+      if chain == "solana" and market_cap < 200000:
+        async with processing_lock:
+          if check_and_reset_daily_quota() and mint_address not in solana_200k_tracked:
+            daily_strategy_state["count"] += 1
+            base_token = p.get("baseToken") or {}
+            token_name = base_token.get("name", "Unknown")
+            token_symbol = base_token.get("symbol", "???")
+            url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
+            image_url = (p.get("info") or {}).get("imageUrl")
+
+            solana_200k_tracked[mint_address] = {
                 "chain": chain,
+                "initial_mc": market_cap,
                 "name": token_name,
                 "symbol": token_symbol,
-                "address": mint_address,
-                "mc": market_cap,
-                "volume": volume,
-                "buys": buys,
-                "sells": sells,
-                "url": url,
-                "image": image_url,
-                "website": website_url,
-                "telegram": telegram_url,
-                "twitter": twitter_url,
-            },
-        )
+                "target_hit": False,
+            }
+            save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
+
+            await send_solana_200k_strategy_alert(
+                session,
+                {
+                    "chain": chain,
+                    "name": token_name,
+                    "symbol": token_symbol,
+                    "address": mint_address,
+                    "mc": market_cap,
+                    "url": url,
+                    "image": image_url,
+                },
+            )
+            return
+
+      if market_cap < 50000:
+        async with processing_lock:
+          incubation_tokens[mint_address] = {"chain": chain}
+        save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
+        return
+
+      image_url = (p.get("info") or {}).get("imageUrl")
+      base_token = p.get("baseToken") or {}
+      token_name = base_token.get("name", "Unknown")
+      token_symbol = base_token.get("symbol", "???")
+      url = p.get("url", f"https://dexscreener.com/{chain}/{mint_address}")
+
+      info = p.get("info") or {}
+      websites = info.get("websites") or []
+      socials = info.get("socials") or []
+
+      website_url = websites[0]["url"] if websites else None
+      telegram_url = None
+      twitter_url = None
+
+      for s in socials:
+        stype = str(s.get("type", "")).lower()
+        surl = str(s.get("url", ""))
+        if "telegram" in stype or "t.me" in surl:
+          telegram_url = surl
+        elif "twitter" in stype or "x.com" in surl or "twitter.com" in surl:
+          twitter_url = surl
+
+      txns_h1 = (p.get("txns") or {}).get("h1") or {}
+      buys = txns_h1.get("buys", 0)
+      sells = txns_h1.get("sells", 0)
+      volume = (p.get("volume") or {}).get("h24", 0)
+
+      async with processing_lock:
+        tracked_tokens[mint_address] = {
+            "chain": chain,
+            "initial_mc": market_cap,
+            "name": token_name,
+            "symbol": token_symbol,
+            "milestone_sent": False,
+        }
+      save_persistence(processed_txs, tracked_tokens, incubation_tokens, solana_200k_tracked, daily_strategy_state)
+
+      await send_pro_channel_alert(
+          session,
+          {
+              "chain": chain,
+              "name": token_name,
+              "symbol": token_symbol,
+              "address": mint_address,
+              "mc": market_cap,
+              "volume": volume,
+              "buys": buys,
+              "sells": sells,
+              "url": url,
+              "image": image_url,
+              "website": website_url,
+              "telegram": telegram_url,
+              "twitter": twitter_url,
+          },
+      )
   except Exception as e:
     print(f"Error processing token discovery {mint_address}: {e}")
-
 
 async def dexscreener_dual_feed_loop(session):
   while True:
@@ -825,21 +711,16 @@ async def dexscreener_dual_feed_loop(session):
         async with session.get(endpoint, timeout=10) as res:
           if res.status == 200:
             data = await res.json()
-            profiles = (
-                data if isinstance(data, list) else (data.get("pairs") or [])
-            )
+            profiles = data if isinstance(data, list) else (data.get("pairs") or [])
             for profile in profiles:
-              chain = str(profile.get("chainId", "")).lower()
-              if chain in SUPPORTED_CHAINS:
+              mapped_chain = get_mapped_chain(profile.get("chainId"))
+              if mapped_chain:
                 mint_address = profile.get("tokenAddress")
                 if mint_address:
-                  asyncio.create_task(
-                      process_token_discovery(session, chain, mint_address)
-                  )
+                  asyncio.create_task(process_token_discovery(session, mapped_chain, mint_address))
     except Exception as e:
       print(f"DexScreener feed fetch error: {e}")
     await asyncio.sleep(3)
-
 
 async def milestone_checker_loop(session):
   while True:
@@ -847,9 +728,8 @@ async def milestone_checker_loop(session):
       await check_token_milestones(session)
       await check_solana_200k_milestones(session)
     except Exception as e:
-      print(f"Milestone checker loop error: {e}")
+      pass
     await asyncio.sleep(15)
-
 
 async def deployer_wallet_tracking_loop(session):
   while True:
@@ -858,17 +738,14 @@ async def deployer_wallet_tracking_loop(session):
         if res.status == 200:
           items = await res.json()
           for item in items if isinstance(items, list) else []:
-            chain = str(item.get("chainId", "")).lower()
-            if chain in SUPPORTED_CHAINS:
+            mapped_chain = get_mapped_chain(item.get("chainId"))
+            if mapped_chain:
               mint = item.get("tokenAddress")
               if mint:
-                asyncio.create_task(
-                    process_token_discovery(session, chain, mint)
-                )
-    except Exception as e:
-      print(f"Deployer tracker error: {e}")
+                asyncio.create_task(process_token_discovery(session, mapped_chain, mint))
+    except Exception:
+      pass
     await asyncio.sleep(20)
-
 
 async def mempool_sniffing_loop(session):
   while True:
@@ -876,21 +753,16 @@ async def mempool_sniffing_loop(session):
       async with session.get(DEXSCREENER_RECENT_PROFILES, timeout=10) as res:
         if res.status == 200:
           data = await res.json()
-          profiles = (
-              data if isinstance(data, list) else (data.get("pairs") or [])
-          )
+          profiles = data if isinstance(data, list) else (data.get("pairs") or [])
           for p in profiles[:15]:
-            chain = str(p.get("chainId", "")).lower()
-            if chain in SUPPORTED_CHAINS:
+            mapped_chain = get_mapped_chain(p.get("chainId"))
+            if mapped_chain:
               mint = p.get("tokenAddress")
               if mint:
-                asyncio.create_task(
-                    process_token_discovery(session, chain, mint)
-                )
-    except Exception as e:
-      print(f"Mempool sniffer feed error: {e}")
+                asyncio.create_task(process_token_discovery(session, mapped_chain, mint))
+    except Exception:
+      pass
     await asyncio.sleep(5)
-
 
 async def social_alpha_scraping_loop(session):
   while True:
@@ -899,38 +771,25 @@ async def social_alpha_scraping_loop(session):
         if res.status == 200:
           items = await res.json()
           for item in items if isinstance(items, list) else []:
-            chain = str(item.get("chainId", "")).lower()
-            if chain in SUPPORTED_CHAINS:
+            mapped_chain = get_mapped_chain(item.get("chainId"))
+            if mapped_chain:
               mint = item.get("tokenAddress")
               if mint:
-                asyncio.create_task(
-                    process_token_discovery(session, chain, mint)
-                )
-    except Exception as e:
-      print(f"Social alpha scraper error: {e}")
+                asyncio.create_task(process_token_discovery(session, mapped_chain, mint))
+    except Exception:
+      pass
     await asyncio.sleep(12)
-
 
 async def handle_text_command(session, text, chat_id):
   try:
     text_lower = text.lower()
     if text_lower in ["/start", "/menu", "menu"]:
       await send_main_menu(session, chat_id=chat_id)
-    elif text_lower in [
-        "🚀 trending memecoins",
-        "trending memecoins",
-        "trending",
-    ]:
+    elif text_lower in ["🚀 trending memecoins", "trending memecoins", "trending"]:
       report = await fetch_all_trending_report(session)
-      await send_telegram_message(
-          session,
-          report,
-          inline_keyboard=get_main_menu_inline_keyboard(),
-          chat_id=chat_id,
-      )
+      await send_telegram_message(session, report, inline_keyboard=get_main_menu_inline_keyboard(), chat_id=chat_id)
   except Exception as e:
     print(f"Error handling text command '{text}': {e}")
-
 
 async def handle_callback_query(session, cb):
   try:
@@ -944,20 +803,13 @@ async def handle_callback_query(session, cb):
       await send_main_menu(session, chat_id=chat_id)
     elif cb_data == "trending_all":
       report = await fetch_all_trending_report(session)
-      await send_telegram_message(
-          session,
-          report,
-          inline_keyboard=get_main_menu_inline_keyboard(),
-          chat_id=chat_id,
-      )
+      await send_telegram_message(session, report, inline_keyboard=get_main_menu_inline_keyboard(), chat_id=chat_id)
   except Exception as e:
     print(f"Error handling callback query: {e}")
-
 
 async def telegram_polling_loop(session):
   offset = 0
   print("[+] Interactive Telegram Polling Loop Started.")
-
   while True:
     try:
       url = f"{TELEGRAM_API}/getUpdates?offset={offset}&timeout=10"
@@ -966,35 +818,25 @@ async def telegram_polling_loop(session):
           data = await res.json()
           for update in data.get("result", []):
             offset = update["update_id"] + 1
-
             try:
               if "message" in update and "text" in update["message"]:
                 msg = update["message"]
                 text = msg["text"].strip()
                 chat_id = msg["chat"]["id"]
-                # Dispatch as non-blocking background task
-                asyncio.create_task(
-                    handle_text_command(session, text, chat_id)
-                )
-
+                asyncio.create_task(handle_text_command(session, text, chat_id))
               elif "callback_query" in update:
                 cb = update["callback_query"]
-                # Dispatch as non-blocking background task
                 asyncio.create_task(handle_callback_query(session, cb))
             except Exception as inner_e:
               print(f"Error processing single update: {inner_e}")
-
     except Exception as e:
-      print(f"Telegram polling loop error: {e}")
-
+      pass
     await asyncio.sleep(1)
-
 
 async def run_pro_omnichain_sniper():
   print("Elite Pro-Styled OmniChain Sniper Active. 6767.")
   async with aiohttp.ClientSession() as session:
     await send_main_menu(session)
-
     await asyncio.gather(
         dexscreener_dual_feed_loop(session),
         milestone_checker_loop(session),
@@ -1005,7 +847,6 @@ async def run_pro_omnichain_sniper():
         telegram_polling_loop(session),
         return_exceptions=True,
     )
-
 
 if __name__ == "__main__":
   asyncio.run(run_pro_omnichain_sniper())

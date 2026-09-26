@@ -125,67 +125,92 @@ async def send_main_menu(session, chat_id=None):
     await send_telegram_message(session, menu_text, get_main_menu_keyboard(), chat_id=chat_id)
 
 async def fetch_top_5_memecoins(session, chain_name):
-    query = "solana" if chain_name == "solana" else "robinhood"
-    url = f"{DEXSCREENER_SEARCH}{query}"
-    
+    """Fetches real top/trending distinct memecoins for the selected network."""
     try:
-        async with session.get(url, timeout=10) as res:
-            if res.status != 200:
-                return f"❌ <b>Error:</b> Unable to fetch {chain_name.upper()} market data at this time."
-            
-            data = await res.json()
-            pairs = data.get("pairs") or []
-            
-            filtered = []
-            seen = set()
-            
-            for p in pairs:
-                p_chain = str(p.get("chainId", "")).lower()
-                if chain_name == "robinhood":
-                    # Matches robinhood chain or EVM proxies associated with Robinhood ecosystem
-                    match_chain = p_chain in ["robinhood", "arbitrum", "ethereum", "base"]
-                else:
-                    match_chain = p_chain == chain_name
+        pairs_to_check = []
+        
+        # 1. Fetch top boosted and trending tokens across DexScreener
+        async with session.get(DEXSCREENER_BOOSTED_TOP, timeout=10) as res:
+            if res.status == 200:
+                boosted = await res.json()
+                for item in (boosted if isinstance(boosted, list) else []):
+                    p_chain = str(item.get("chainId", "")).lower()
+                    if chain_name == "robinhood":
+                        match_chain = p_chain in ["robinhood", "arbitrum", "ethereum", "base"]
+                    else:
+                        match_chain = p_chain == chain_name
                     
-                if match_chain:
-                    base_token = p.get("baseToken") or {}
-                    address = base_token.get("address")
-                    if address and address not in seen:
-                        seen.add(address)
-                        filtered.append(p)
+                    token_addr = item.get("tokenAddress")
+                    if match_chain and token_addr and token_addr not in pairs_to_check:
+                        pairs_to_check.append(token_addr)
+
+        # 2. Fallback search if boosted list is limited
+        if len(pairs_to_check) < 5:
+            fallback_query = "pepe" if chain_name == "robinhood" else "pump"
+            async with session.get(f"{DEXSCREENER_SEARCH}{fallback_query}", timeout=10) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    for p in (data.get("pairs") or []):
+                        p_chain = str(p.get("chainId", "")).lower()
+                        match_chain = (p_chain in ["robinhood", "arbitrum", "ethereum", "base"]) if chain_name == "robinhood" else (p_chain == chain_name)
+                        if match_chain:
+                            base_addr = (p.get("baseToken") or {}).get("address")
+                            if base_addr and base_addr not in pairs_to_check:
+                                pairs_to_check.append(base_addr)
+
+        # 3. Resolve pair information for candidates
+        token_details = []
+        seen_addresses = set()
+
+        for addr in pairs_to_check[:15]:
+            if addr in seen_addresses:
+                continue
+            seen_addresses.add(addr)
             
-            # Sort pairs by 24h Volume descending
-            filtered.sort(key=lambda x: float((x.get("volume") or {}).get("h24") or 0), reverse=True)
-            top_5 = filtered[:5]
-            
-            if not top_5:
-                return f"⚠️ <b>Notice:</b> No high-volume {chain_name.upper()} memecoins detected right now."
-            
-            header_icon = "🔥" if chain_name == "solana" else "🏹"
-            output = f"{header_icon} <b>TOP 5 {chain_name.upper()} MEMECOINS (BY 24H VOLUME)</b> {header_icon}\n\n"
-            
-            for idx, token in enumerate(top_5, 1):
-                base = token.get("baseToken") or {}
-                name = html.escape(str(base.get("name", "Unknown")))
-                symbol = html.escape(str(base.get("symbol", "???")))
-                mc = float(token.get("marketCap") or token.get("fdv") or 0)
-                vol = float((token.get("volume") or {}).get("h24") or 0)
-                price_change = float((token.get("priceChange") or {}).get("h24") or 0)
-                pair_url = token.get("url", "https://dexscreener.com")
-                
-                change_sign = "+" if price_change >= 0 else ""
-                
-                output += (
-                    f"<b>{idx}. {name} (${symbol})</b>\n"
-                    f"   📈 <b>Market Cap:</b> ${mc:,.0f}\n"
-                    f"   📊 <b>24h Volume:</b> ${vol:,.0f}\n"
-                    f"   ⚡ <b>24h Change:</b> {change_sign}{price_change:.2f}%\n"
-                    f"   🔗 <a href='{pair_url}'>View Chart on DexScreener</a>\n\n"
-                )
-                
-            output += "💎 <i>Live Intelligence Powered by OmniChain Engine 6767</i>"
-            return output
-            
+            try:
+                async with session.get(f"{DEXSCREENER_TOKEN}{addr}", timeout=5) as res:
+                    if res.status == 200:
+                        t_data = await res.json()
+                        pairs = t_data.get("pairs") or []
+                        if pairs:
+                            # Select highest 24h volume pair for token
+                            best_pair = max(pairs, key=lambda x: float((x.get("volume") or {}).get("h24") or 0))
+                            token_details.append(best_pair)
+            except Exception:
+                continue
+
+        # 4. Sort by 24h Volume descending
+        token_details.sort(key=lambda x: float((x.get("volume") or {}).get("h24") or 0), reverse=True)
+        top_5 = token_details[:5]
+
+        if not top_5:
+            return f"⚠️ <b>Notice:</b> No high-volume {chain_name.upper()} memecoins detected right now."
+
+        header_icon = "🔥" if chain_name == "solana" else "🏹"
+        output = f"{header_icon} <b>TOP 5 {chain_name.upper()} MEMECOINS (BY 24H VOLUME)</b> {header_icon}\n\n"
+
+        for idx, token in enumerate(top_5, 1):
+            base = token.get("baseToken") or {}
+            name = html.escape(str(base.get("name", "Unknown")))
+            symbol = html.escape(str(base.get("symbol", "???")))
+            mc = float(token.get("marketCap") or token.get("fdv") or 0)
+            vol = float((token.get("volume") or {}).get("h24") or 0)
+            price_change = float((token.get("priceChange") or {}).get("h24") or 0)
+            pair_url = token.get("url", "https://dexscreener.com")
+
+            change_sign = "+" if price_change >= 0 else ""
+
+            output += (
+                f"<b>{idx}. {name} (${symbol})</b>\n"
+                f"   📈 <b>Market Cap:</b> ${mc:,.0f}\n"
+                f"   📊 <b>24h Volume:</b> ${vol:,.0f}\n"
+                f"   ⚡ <b>24h Change:</b> {change_sign}{price_change:.2f}%\n"
+                f"   🔗 <a href='{pair_url}'>View Chart on DexScreener</a>\n\n"
+            )
+
+        output += "💎 <i>Live Intelligence Powered by OmniChain Engine 6767</i>"
+        return output
+
     except Exception as e:
         print(f"Error fetching top memecoins for {chain_name}: {e}")
         return f"❌ <b>Error:</b> Exception occurred while gathering {chain_name.upper()} data."
@@ -199,7 +224,6 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
         txns_h1 = txns_data.get("h1") or {}
         buys_h1 = int(txns_h1.get("buys") or 0)
         
-        # General activity floor filter
         if volume_h1 < 1000 or buys_h1 < 2:
             return False
 
@@ -229,7 +253,6 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
             raw_usd = lp_info.get("usd", 0) if isinstance(lp_info, dict) else 0
             lp_usd = float(raw_usd) if raw_usd is not None else 0.0
             
-            # Optimized liquidity floor for early Robinhood micro-caps
             if lp_usd < 3000:
                 return False
                 
@@ -489,7 +512,6 @@ async def process_token_discovery(session, chain, raw_mint):
             p = pairs[0]
             market_cap = p.get("marketCap") or p.get("fdv") or 0
             
-            # Adjusted maximum ceiling for initial alert screening
             if market_cap > 300000:
                 return
             
@@ -678,7 +700,7 @@ async def telegram_polling_loop(session):
                     for update in data.get("result", []):
                         offset = update["update_id"] + 1
                         
-                        # Handle Direct Message Commands
+                        # Direct Message Command Handling
                         if "message" in update and "text" in update["message"]:
                             msg = update["message"]
                             text = msg["text"].strip().lower()
@@ -692,7 +714,7 @@ async def telegram_polling_loop(session):
                                 rh_report = await fetch_top_5_memecoins(session, "robinhood")
                                 await send_telegram_message(session, rh_report, get_main_menu_keyboard(), chat_id=chat_id)
 
-                        # Handle Inline Menu Button Clicks
+                        # Inline Menu Button Callback Handling
                         elif "callback_query" in update:
                             cb = update["callback_query"]
                             cb_id = cb["id"]
@@ -732,7 +754,6 @@ async def telegram_polling_loop(session):
 async def run_pro_omnichain_sniper():
     print("Elite Pro-Styled OmniChain Sniper + Interactive Menu fully active, baby. 6767.")
     async with aiohttp.ClientSession() as session:
-        # Initial greeting and command menu initialization
         await send_main_menu(session)
         
         await asyncio.gather(

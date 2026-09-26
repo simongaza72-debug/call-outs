@@ -117,7 +117,6 @@ async def send_telegram_message(
         "disable_web_page_preview": True,
     }
 
-    # Handle keyboards (reply keyboard or inline keyboard)
     if reply_keyboard:
       payload["reply_markup"] = {
           "keyboard": reply_keyboard,
@@ -173,37 +172,17 @@ async def answer_callback_query(session, callback_id, text="Processing..."):
 
 
 def get_main_menu_inline_keyboard():
-  return [
-      [{"text": "🚀 Trending Memecoins", "callback_data": "trending_all"}],
-      [
-          {"text": "🔥 Top 5 Solana", "callback_data": "top_solana"},
-          {"text": "🏹 Top 5 Robinhood", "callback_data": "top_robinhood"},
-      ],
-      [
-          {"text": "🏆 #1 Solana Gem", "callback_data": "top1_solana"},
-          {"text": "🏆 #1 Robinhood Gem", "callback_data": "top1_robinhood"},
-      ],
-      [
-          {"text": "📊 Bot Status", "callback_data": "bot_stats"},
-          {"text": "🔄 Refresh Menu", "callback_data": "show_menu"},
-      ],
-  ]
+  return [[{"text": "🚀 Trending Memecoins", "callback_data": "trending_all"}]]
 
 
 def get_persistent_reply_keyboard():
-  return [
-      ["🚀 Trending Memecoins"],
-      ["🔥 Top 5 Solana", "🏹 Top 5 Robinhood"],
-      ["🏆 #1 Solana Gem", "🏆 #1 Robinhood Gem"],
-      ["📊 Bot Status", "🔄 Refresh Menu"],
-  ]
+  return [["🚀 Trending Memecoins"]]
 
 
 async def send_main_menu(session, chat_id=None):
-  # 1. Send / Refresh bottom persistent reply keyboard
   menu_prompt = (
       "⌨️ <b>OMNICHAIN COMMAND CENTER ACTIVE</b>\n\n"
-      "<i>Tap any bottom menu button or use the options below for live data:</i>"
+      "<i>Tap the button below for live trending memecoins:</i>"
   )
   await send_telegram_message(
       session,
@@ -211,8 +190,6 @@ async def send_main_menu(session, chat_id=None):
       reply_keyboard=get_persistent_reply_keyboard(),
       chat_id=chat_id,
   )
-
-  # 2. Send inline command card
   await send_telegram_message(
       session,
       "⚡ <b>Select an action:</b>",
@@ -221,8 +198,24 @@ async def send_main_menu(session, chat_id=None):
   )
 
 
+async def fetch_token_detail(session, addr):
+  try:
+    async with session.get(f"{DEXSCREENER_TOKEN}{addr}", timeout=5) as res:
+      if res.status == 200:
+        t_data = await res.json()
+        pairs = t_data.get("pairs") or []
+        if pairs:
+          return max(
+              pairs,
+              key=lambda x: float((x.get("volume") or {}).get("h24") or 0),
+          )
+  except Exception:
+    pass
+  return None
+
+
 async def fetch_top_memecoins_data(session, chain_name):
-  """Fetches top boosted/volume pairs for a given network chain."""
+  """Fetches top boosted/volume pairs for a given network chain in parallel."""
   pairs_to_check = []
 
   try:
@@ -259,30 +252,11 @@ async def fetch_top_memecoins_data(session, chain_name):
               if base_addr and base_addr not in pairs_to_check:
                 pairs_to_check.append(base_addr)
 
-    token_details = []
-    seen_addresses = set()
-
-    for addr in pairs_to_check[:15]:
-      if addr in seen_addresses:
-        continue
-      seen_addresses.add(addr)
-      try:
-        async with session.get(
-            f"{DEXSCREENER_TOKEN}{addr}", timeout=5
-        ) as res:
-          if res.status == 200:
-            t_data = await res.json()
-            pairs = t_data.get("pairs") or []
-            if pairs:
-              best_pair = max(
-                  pairs,
-                  key=lambda x: float(
-                      (x.get("volume") or {}).get("h24") or 0
-                  ),
-              )
-              token_details.append(best_pair)
-      except Exception:
-        continue
+    unique_addrs = list(dict.fromkeys(pairs_to_check[:15]))
+    results = await asyncio.gather(
+        *[fetch_token_detail(session, addr) for addr in unique_addrs]
+    )
+    token_details = [r for r in results if r is not None]
 
     token_details.sort(
         key=lambda x: float((x.get("volume") or {}).get("h24") or 0),
@@ -342,53 +316,6 @@ async def fetch_all_trending_report(session):
       f"{rh_report}\n"
       "💎 <i>Live Intelligence Powered by OmniChain Engine 6767</i>"
   )
-
-
-async def send_single_top1_memecoin(session, chain_name, chat_id=None):
-  top_tokens = await fetch_top_memecoins_data(session, chain_name)
-  if not top_tokens:
-    await send_telegram_message(
-        session,
-        f"⚠️ No {chain_name.upper()} top token available right now.",
-        chat_id=chat_id,
-    )
-    return
-
-  token = top_tokens[0]
-  base = token.get("baseToken") or {}
-  name = html.escape(str(base.get("name", "Unknown")))
-  symbol = html.escape(str(base.get("symbol", "???")))
-  address = base.get("address", "N/A")
-  mc = float(token.get("marketCap") or token.get("fdv") or 0)
-  vol = float((token.get("volume") or {}).get("h24") or 0)
-  price_change = float((token.get("priceChange") or {}).get("h24") or 0)
-  url = token.get("url", "https://dexscreener.com")
-  image_url = (token.get("info") or {}).get("imageUrl")
-
-  change_sign = "+" if price_change >= 0 else ""
-
-  caption = (
-      f"🏆 <b>#1 TOP {chain_name.upper()} MEMECOIN SPOTLIGHT</b> 🏆\n\n"
-      f"🪙 <b>Token:</b> {name} (${symbol})\n"
-      f"📈 <b>Market Cap:</b> ${mc:,.0f}\n"
-      f"📊 <b>24h Volume:</b> ${vol:,.0f}\n"
-      f"⚡ <b>24h Change:</b> {change_sign}{price_change:.2f}%\n"
-      f"📋 <b>CA:</b> <code>{address}</code>\n\n"
-      f"💎 <i>Highest Volume Runner on {chain_name.upper()}. 6767</i>"
-  )
-
-  keyboard = [
-      [{"text": "📈 View Chart", "url": url}, {"text": "⚡ Buy Token", "url": url}]
-  ]
-
-  if image_url and str(image_url).startswith("http"):
-    await send_telegram_photo(
-        session, image_url, caption, keyboard, chat_id=chat_id
-    )
-  else:
-    await send_telegram_message(
-        session, caption, keyboard, chat_id=chat_id
-    )
 
 
 async def advanced_intelligence_filter(
@@ -624,107 +551,110 @@ async def check_token_milestones(session):
 
 async def incubation_checker_loop(session):
   while True:
-    if not incubation_tokens:
-      await asyncio.sleep(10)
-      continue
+    try:
+      if not incubation_tokens:
+        await asyncio.sleep(10)
+        continue
 
-    updated = False
-    for mint_address, data in list(incubation_tokens.items()):
-      try:
-        async with session.get(
-            f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5
-        ) as res:
-          if res.status == 200:
-            json_data = await res.json()
-            pairs = json_data.get("pairs") or []
-            if pairs:
-              p = pairs[0]
-              current_mc = p.get("marketCap") or p.get("fdv") or 0
-              chain = data["chain"]
+      updated = False
+      for mint_address, data in list(incubation_tokens.items()):
+        try:
+          async with session.get(
+              f"{DEXSCREENER_TOKEN}{mint_address}", timeout=5
+          ) as res:
+            if res.status == 200:
+              json_data = await res.json()
+              pairs = json_data.get("pairs") or []
+              if pairs:
+                p = pairs[0]
+                current_mc = p.get("marketCap") or p.get("fdv") or 0
+                chain = data["chain"]
 
-              if 50000 <= current_mc <= 300000:
-                base_token = p.get("baseToken") or {}
-                token_name = base_token.get("name", "Unknown")
-                token_symbol = base_token.get("symbol", "???")
-                url = p.get(
-                    "url", f"https://dexscreener.com/{chain}/{mint_address}"
-                )
-                image_url = (p.get("info") or {}).get("imageUrl")
+                if 50000 <= current_mc <= 300000:
+                  base_token = p.get("baseToken") or {}
+                  token_name = base_token.get("name", "Unknown")
+                  token_symbol = base_token.get("symbol", "???")
+                  url = p.get(
+                      "url", f"https://dexscreener.com/{chain}/{mint_address}"
+                  )
+                  image_url = (p.get("info") or {}).get("imageUrl")
 
-                info = p.get("info") or {}
-                websites = info.get("websites") or []
-                socials = info.get("socials") or []
+                  info = p.get("info") or {}
+                  websites = info.get("websites") or []
+                  socials = info.get("socials") or []
 
-                website_url = websites[0]["url"] if websites else None
-                telegram_url = None
-                twitter_url = None
+                  website_url = websites[0]["url"] if websites else None
+                  telegram_url = None
+                  twitter_url = None
 
-                for s in socials:
-                  stype = str(s.get("type", "")).lower()
-                  surl = str(s.get("url", ""))
-                  if "telegram" in stype or "t.me" in surl:
-                    telegram_url = surl
-                  elif (
-                      "twitter" in stype
-                      or "x.com" in surl
-                      or "twitter.com" in surl
-                  ):
-                    twitter_url = surl
+                  for s in socials:
+                    stype = str(s.get("type", "")).lower()
+                    surl = str(s.get("url", ""))
+                    if "telegram" in stype or "t.me" in surl:
+                      telegram_url = surl
+                    elif (
+                        "twitter" in stype
+                        or "x.com" in surl
+                        or "twitter.com" in surl
+                    ):
+                      twitter_url = surl
 
-                txns_h1 = (p.get("txns") or {}).get("h1") or {}
-                buys = txns_h1.get("buys", 0)
-                sells = txns_h1.get("sells", 0)
-                volume = (p.get("volume") or {}).get("h24", 0)
+                  txns_h1 = (p.get("txns") or {}).get("h1") or {}
+                  buys = txns_h1.get("buys", 0)
+                  sells = txns_h1.get("sells", 0)
+                  volume = (p.get("volume") or {}).get("h24", 0)
 
-                async with processing_lock:
-                  if mint_address in incubation_tokens:
-                    del incubation_tokens[mint_address]
-                  processed_txs.add(mint_address)
-                  tracked_tokens[mint_address] = {
-                      "chain": chain,
-                      "initial_mc": current_mc,
-                      "name": token_name,
-                      "symbol": token_symbol,
-                      "milestone_sent": False,
-                  }
-                updated = True
-
-                await send_pro_channel_alert(
-                    session,
-                    {
+                  async with processing_lock:
+                    if mint_address in incubation_tokens:
+                      del incubation_tokens[mint_address]
+                    processed_txs.add(mint_address)
+                    tracked_tokens[mint_address] = {
                         "chain": chain,
+                        "initial_mc": current_mc,
                         "name": token_name,
                         "symbol": token_symbol,
-                        "address": mint_address,
-                        "mc": current_mc,
-                        "volume": volume,
-                        "buys": buys,
-                        "sells": sells,
-                        "url": url,
-                        "image": image_url,
-                        "website": website_url,
-                        "telegram": telegram_url,
-                        "twitter": twitter_url,
-                    },
-                )
+                        "milestone_sent": False,
+                    }
+                  updated = True
 
-              elif current_mc > 300000:
-                async with processing_lock:
-                  if mint_address in incubation_tokens:
-                    del incubation_tokens[mint_address]
-                  processed_txs.add(mint_address)
-                updated = True
-      except Exception as e:
-        print(f"Incubation check error for {mint_address}: {e}")
+                  await send_pro_channel_alert(
+                      session,
+                      {
+                          "chain": chain,
+                          "name": token_name,
+                          "symbol": token_symbol,
+                          "address": mint_address,
+                          "mc": current_mc,
+                          "volume": volume,
+                          "buys": buys,
+                          "sells": sells,
+                          "url": url,
+                          "image": image_url,
+                          "website": website_url,
+                          "telegram": telegram_url,
+                          "twitter": twitter_url,
+                      },
+                  )
 
-    if updated:
-      save_persistence(
-          processed_txs,
-          tracked_tokens,
-          incubation_tokens,
-          solana_200k_tracked,
-          daily_strategy_state,
-      )
+                elif current_mc > 300000:
+                  async with processing_lock:
+                    if mint_address in incubation_tokens:
+                      del incubation_tokens[mint_address]
+                    processed_txs.add(mint_address)
+                  updated = True
+        except Exception as e:
+          print(f"Incubation check error for {mint_address}: {e}")
+
+      if updated:
+        save_persistence(
+            processed_txs,
+            tracked_tokens,
+            incubation_tokens,
+            solana_200k_tracked,
+            daily_strategy_state,
+        )
+    except Exception as outer_e:
+      print(f"Incubation loop outer error: {outer_e}")
 
     await asyncio.sleep(10)
 
@@ -913,8 +843,11 @@ async def dexscreener_dual_feed_loop(session):
 
 async def milestone_checker_loop(session):
   while True:
-    await check_token_milestones(session)
-    await check_solana_200k_milestones(session)
+    try:
+      await check_token_milestones(session)
+      await check_solana_200k_milestones(session)
+    except Exception as e:
+      print(f"Milestone checker loop error: {e}")
     await asyncio.sleep(15)
 
 
@@ -978,6 +911,49 @@ async def social_alpha_scraping_loop(session):
     await asyncio.sleep(12)
 
 
+async def handle_text_command(session, text, chat_id):
+  try:
+    text_lower = text.lower()
+    if text_lower in ["/start", "/menu", "menu"]:
+      await send_main_menu(session, chat_id=chat_id)
+    elif text_lower in [
+        "🚀 trending memecoins",
+        "trending memecoins",
+        "trending",
+    ]:
+      report = await fetch_all_trending_report(session)
+      await send_telegram_message(
+          session,
+          report,
+          inline_keyboard=get_main_menu_inline_keyboard(),
+          chat_id=chat_id,
+      )
+  except Exception as e:
+    print(f"Error handling text command '{text}': {e}")
+
+
+async def handle_callback_query(session, cb):
+  try:
+    cb_id = cb["id"]
+    cb_data = cb.get("data")
+    chat_id = cb["message"]["chat"]["id"]
+
+    await answer_callback_query(session, cb_id)
+
+    if cb_data == "show_menu":
+      await send_main_menu(session, chat_id=chat_id)
+    elif cb_data == "trending_all":
+      report = await fetch_all_trending_report(session)
+      await send_telegram_message(
+          session,
+          report,
+          inline_keyboard=get_main_menu_inline_keyboard(),
+          chat_id=chat_id,
+      )
+  except Exception as e:
+    print(f"Error handling callback query: {e}")
+
+
 async def telegram_polling_loop(session):
   offset = 0
   print("[+] Interactive Telegram Polling Loop Started.")
@@ -991,150 +967,22 @@ async def telegram_polling_loop(session):
           for update in data.get("result", []):
             offset = update["update_id"] + 1
 
-            # Handle text input (Commands & Persistent Reply Keyboard clicks)
-            if "message" in update and "text" in update["message"]:
-              msg = update["message"]
-              text = msg["text"].strip()
-              text_lower = text.lower()
-              chat_id = msg["chat"]["id"]
-
-              if text_lower in ["/start", "/menu", "menu", "🔄 refresh menu"]:
-                await send_main_menu(session, chat_id=chat_id)
-
-              elif text_lower in [
-                  "🚀 trending memecoins",
-                  "trending memecoins",
-                  "trending",
-              ]:
-                report = await fetch_all_trending_report(session)
-                await send_telegram_message(
-                    session,
-                    report,
-                    inline_keyboard=get_main_menu_inline_keyboard(),
-                    chat_id=chat_id,
+            try:
+              if "message" in update and "text" in update["message"]:
+                msg = update["message"]
+                text = msg["text"].strip()
+                chat_id = msg["chat"]["id"]
+                # Dispatch as non-blocking background task
+                asyncio.create_task(
+                    handle_text_command(session, text, chat_id)
                 )
 
-              elif text_lower in [
-                  "🔥 top 5 solana memecoins",
-                  "🔥 top 5 solana",
-              ]:
-                report = await fetch_top_5_memecoins_report(session, "solana")
-                await send_telegram_message(
-                    session,
-                    report,
-                    inline_keyboard=get_main_menu_inline_keyboard(),
-                    chat_id=chat_id,
-                )
-
-              elif text_lower in [
-                  "🏹 top 5 robinhood memecoins",
-                  "🏹 top 5 robinhood",
-              ]:
-                report = await fetch_top_5_memecoins_report(
-                    session, "robinhood"
-                )
-                await send_telegram_message(
-                    session,
-                    report,
-                    inline_keyboard=get_main_menu_inline_keyboard(),
-                    chat_id=chat_id,
-                )
-
-              elif text_lower in ["🏆 #1 top solana gem", "🏆 #1 solana gem"]:
-                await send_single_top1_memecoin(
-                    session, "solana", chat_id=chat_id
-                )
-
-              elif text_lower in [
-                  "🏆 #1 top robinhood gem",
-                  "🏆 #1 robinhood gem",
-              ]:
-                await send_single_top1_memecoin(
-                    session, "robinhood", chat_id=chat_id
-                )
-
-              elif text_lower in ["📊 bot status & stats", "📊 bot status"]:
-                stats_msg = (
-                    "📊 <b>OMNICHAIN SNIPER ENGINE TELEMETRY</b> 📊\n\n"
-                    f"🟢 <b>Tracked Runners:</b> {len(tracked_tokens)}\n"
-                    f"🐣 <b>Incubation Watchlist:</b> {len(incubation_tokens)}\n"
-                    f"🎯 <b>Solana 200K Entries:</b> {len(solana_200k_tracked)}\n"
-                    "📅 <b>Daily Strategy Quota:</b>"
-                    f" {daily_strategy_state.get('count', 0)}/5 used today\n"
-                    f"⚙️ <b>Processed History:</b> {len(processed_txs)} tokens"
-                    " indexed\n\n"
-                    "🛡️ <i>Engine operational and deduplicated. 6767</i>"
-                )
-                await send_telegram_message(
-                    session,
-                    stats_msg,
-                    inline_keyboard=get_main_menu_inline_keyboard(),
-                    chat_id=chat_id,
-                )
-
-            # Handle Inline Menu Callbacks
-            elif "callback_query" in update:
-              cb = update["callback_query"]
-              cb_id = cb["id"]
-              cb_data = cb.get("data")
-              chat_id = cb["message"]["chat"]["id"]
-
-              await answer_callback_query(session, cb_id)
-
-              if cb_data == "show_menu":
-                await send_main_menu(session, chat_id=chat_id)
-              elif cb_data == "trending_all":
-                report = await fetch_all_trending_report(session)
-                await send_telegram_message(
-                    session,
-                    report,
-                    inline_keyboard=get_main_menu_inline_keyboard(),
-                    chat_id=chat_id,
-                )
-              elif cb_data == "top_solana":
-                report = await fetch_top_5_memecoins_report(session, "solana")
-                await send_telegram_message(
-                    session,
-                    report,
-                    inline_keyboard=get_main_menu_inline_keyboard(),
-                    chat_id=chat_id,
-                )
-              elif cb_data == "top_robinhood":
-                report = await fetch_top_5_memecoins_report(
-                    session, "robinhood"
-                )
-                await send_telegram_message(
-                    session,
-                    report,
-                    inline_keyboard=get_main_menu_inline_keyboard(),
-                    chat_id=chat_id,
-                )
-              elif cb_data == "top1_solana":
-                await send_single_top1_memecoin(
-                    session, "solana", chat_id=chat_id
-                )
-              elif cb_data == "top1_robinhood":
-                await send_single_top1_memecoin(
-                    session, "robinhood", chat_id=chat_id
-                )
-              elif cb_data == "bot_stats":
-                stats_msg = (
-                    "📊 <b>OMNICHAIN SNIPER ENGINE TELEMETRY</b> 📊\n\n"
-                    f"🟢 <b>Tracked Runners:</b> {len(tracked_tokens)}\n"
-                    f"🐣 <b>Incubation Watchlist:</b> {len(incubation_tokens)}\n"
-                    f"🎯 <b>Solana 200K Entries:</b> {len(solana_200k_tracked)}\n"
-                    "📅 <b>Daily Strategy Quota:</b>"
-                    f" {daily_strategy_state.get('count', 0)}/5 used today\n"
-                    f"⚙️ <b>Processed History:</b> {len(processed_txs)} tokens"
-                    " indexed\n\n"
-                    "🛡️ <i>Engine operational and deduplicated. 6767</i>"
-                )
-                await send_telegram_message(
-                    session,
-                    stats_msg,
-                    inline_keyboard=get_main_menu_inline_keyboard(),
-                    chat_id=chat_id,
-                )
+              elif "callback_query" in update:
+                cb = update["callback_query"]
+                # Dispatch as non-blocking background task
+                asyncio.create_task(handle_callback_query(session, cb))
+            except Exception as inner_e:
+              print(f"Error processing single update: {inner_e}")
 
     except Exception as e:
       print(f"Telegram polling loop error: {e}")
@@ -1143,10 +991,7 @@ async def telegram_polling_loop(session):
 
 
 async def run_pro_omnichain_sniper():
-  print(
-      "Elite Pro-Styled OmniChain Sniper + Deduplicated Keyboard Interface"
-      " Active. 6767."
-  )
+  print("Elite Pro-Styled OmniChain Sniper Active. 6767.")
   async with aiohttp.ClientSession() as session:
     await send_main_menu(session)
 
@@ -1158,6 +1003,7 @@ async def run_pro_omnichain_sniper():
         mempool_sniffing_loop(session),
         social_alpha_scraping_loop(session),
         telegram_polling_loop(session),
+        return_exceptions=True,
     )
 
 

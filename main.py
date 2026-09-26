@@ -122,8 +122,8 @@ async def answer_callback_query(session, callback_id, text="Processing..."):
 def get_main_menu_inline_keyboard():
     return [
         [
-            {"text": "🔥 Top 5 Solana Memecoins", "callback_data": "top_solana"},
-            {"text": "🏹 Top 5 Robinhood Memecoins", "callback_data": "top_robinhood"}
+            {"text": "🔥 24H Trending Solana", "callback_data": "top_solana"},
+            {"text": "🏹 24H Trending Robinhood", "callback_data": "top_robinhood"}
         ],
         [
             {"text": "🏆 #1 Top Solana Gem", "callback_data": "top1_solana"},
@@ -135,9 +135,11 @@ def get_main_menu_inline_keyboard():
         ]
     ]
 
+# Bottom Persistent Reply Keyboard (Formatted full-width stacked like screenshot)
 def get_persistent_reply_keyboard():
     return [
-        ["🔥 Top 5 Solana", "🏹 Top 5 Robinhood"],
+        ["🔥 24H Trending Solana Memecoins"],
+        ["🏹 24H Trending Robinhood Memecoins"],
         ["🏆 #1 Solana Gem", "🏆 #1 Robinhood Gem"],
         ["📊 Bot Status", "🔄 Refresh Menu"]
     ]
@@ -145,7 +147,7 @@ def get_persistent_reply_keyboard():
 async def send_main_menu(session, chat_id=None):
     menu_text = (
         "💎 <b>OMNICHAIN SNIPER COMMAND CENTER</b> 💎\n\n"
-        "<i>Select an option below or use the persistent bottom menu to view real-time market data:</i>"
+        "<i>Select an option below or use the persistent bottom menu to view real-time 24hr trending market data:</i>"
     )
     await send_telegram_message(
         session, 
@@ -156,7 +158,7 @@ async def send_main_menu(session, chat_id=None):
     )
 
 async def fetch_top_memecoins_data(session, chain_name):
-    """Fetches top boosted/volume pairs for a given network chain."""
+    """Fetches top 24h volume/boosted pairs for a given network chain."""
     pairs_to_check = []
     
     try:
@@ -212,10 +214,10 @@ async def fetch_top_5_memecoins_report(session, chain_name):
     top_5 = top_tokens[:5]
 
     if not top_5:
-        return f"⚠️ <b>Notice:</b> No high-volume {chain_name.upper()} memecoins detected right now."
+        return f"⚠️ <b>Notice:</b> No high-volume 24h trending {chain_name.upper()} memecoins detected right now."
 
     header_icon = "🔥" if chain_name == "solana" else "🏹"
-    output = f"{header_icon} <b>TOP 5 {chain_name.upper()} MEMECOINS (BY 24H VOLUME)</b> {header_icon}\n\n"
+    output = f"{header_icon} <b>TOP 24H TRENDING {chain_name.upper()} MEMECOINS</b> {header_icon}\n\n"
 
     for idx, token in enumerate(top_5, 1):
         base = token.get("baseToken") or {}
@@ -236,7 +238,7 @@ async def fetch_top_5_memecoins_report(session, chain_name):
             f"   🔗 <a href='{pair_url}'>View Chart on DexScreener</a>\n\n"
         )
 
-    output += "💎 <i>Live Intelligence Powered by OmniChain Engine 6767</i>"
+    output += "💎 <i>Live 24H Market Intelligence Powered by OmniChain Engine 6767</i>"
     return output
 
 async def send_single_top1_memecoin(session, chain_name, chat_id=None):
@@ -259,7 +261,7 @@ async def send_single_top1_memecoin(session, chain_name, chat_id=None):
     change_sign = "+" if price_change >= 0 else ""
 
     caption = (
-        f"🏆 <b>#1 TOP {chain_name.upper()} MEMECOIN SPOTLIGHT</b> 🏆\n\n"
+        f"🏆 <b>#1 TOP 24H TRENDING {chain_name.upper()} MEMECOIN</b> 🏆\n\n"
         f"🪙 <b>Token:</b> {name} (${symbol})\n"
         f"📈 <b>Market Cap:</b> ${mc:,.0f}\n"
         f"📊 <b>24h Volume:</b> ${vol:,.0f}\n"
@@ -766,10 +768,10 @@ async def telegram_polling_loop(session):
                             
                             if text_lower in ["/start", "/menu", "menu", "🔄 refresh menu"]:
                                 await send_main_menu(session, chat_id=chat_id)
-                            elif text_lower in ["🔥 top 5 solana memecoins", "🔥 top 5 solana"]:
+                            elif text_lower in ["🔥 24h trending solana memecoins", "🔥 top 5 solana memecoins", "🔥 top 5 solana", "24h trending solana"]:
                                 report = await fetch_top_5_memecoins_report(session, "solana")
                                 await send_telegram_message(session, report, inline_keyboard=get_main_menu_inline_keyboard(), chat_id=chat_id)
-                            elif text_lower in ["🏹 top 5 robinhood memecoins", "🏹 top 5 robinhood"]:
+                            elif text_lower in ["🏹 24h trending robinhood memecoins", "🏹 top 5 robinhood memecoins", "🏹 top 5 robinhood", "24h trending robinhood"]:
                                 report = await fetch_top_5_memecoins_report(session, "robinhood")
                                 await send_telegram_message(session, report, inline_keyboard=get_main_menu_inline_keyboard(), chat_id=chat_id)
                             elif text_lower in ["🏆 #1 top solana gem", "🏆 #1 solana gem"]:
@@ -827,7 +829,7 @@ async def telegram_polling_loop(session):
         await asyncio.sleep(1)
 
 async def run_pro_omnichain_sniper():
-    print("Elite Pro-Styled OmniChain Sniper + Deduplicated Keyboard Interface Active. 6767.")
+    print("Elite Pro-Styled OmniChain Sniper Active. 6767.")
     async with aiohttp.ClientSession() as session:
         await send_main_menu(session)
         

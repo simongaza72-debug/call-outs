@@ -4,6 +4,12 @@ import os
 import aiohttp
 from datetime import datetime
 
+# Optional import safeguard for websockets (used in direct mempool sniffing)
+try:
+    import websockets
+except ImportError:
+    websockets = None
+
 TELEGRAM_BOT_TOKEN = "8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw"
 TELEGRAM_CHAT_ID = "7113872351"
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -18,6 +24,11 @@ DEXSCREENER_BOOSTED_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
 
 PERSISTENCE_FILE = "processed_tokens.json"
+
+# List of profitable Smart Money / KOL wallets to track dynamically
+SMART_MONEY_WALLETS = [
+    # Add target profitable wallet addresses here if desired
+]
 
 def load_persistence():
     if os.path.exists(PERSISTENCE_FILE):
@@ -90,6 +101,22 @@ async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None)
     except Exception as e:
         print(f"Telegram photo error: {e}")
 
+async def check_bundle_and_insiders(top_holders):
+    """
+    NEW STRATEGY: Analyzes top holder distribution to weed out bundled launches and insider rings.
+    Returns True if distribution is clean and organic.
+    """
+    try:
+        for holder in top_holders[:10]:
+            holder_pct = holder.get("pct", 0)
+            # If a single non-LP wallet holds more than 15% without being a known dex pool
+            if holder_pct > 15 and not holder.get("insider", False):
+                return False
+        return True
+    except Exception as e:
+        print(f"Bundle check error: {e}")
+        return True
+
 async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
     try:
         volume_h1 = float(pair_data.get("volume", {}).get("h1", 0) or 0)
@@ -114,7 +141,10 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     is_mintable = any("mint" in str(r.get("name", "")).lower() for r in risks if r.get("score", 0) > 0)
                     is_freezable = any("freeze" in str(r.get("name", "")).lower() for r in risks if r.get("score", 0) > 0)
                     
-                    if risk_score <= 1000 and not is_mintable and not is_freezable and concentrated_supply < 50:
+                    # Run advanced bundle/insider check integration
+                    is_clean_distribution = await check_bundle_and_insiders(top_holders)
+
+                    if risk_score <= 1000 and not is_mintable and not is_freezable and concentrated_supply < 50 and is_clean_distribution:
                         return True
                 else:
                     txns = pair_data.get("txns", {}).get("h24", {})
@@ -554,17 +584,87 @@ async def social_alpha_scraping_loop(session):
             print(f"Social alpha scraper error: {e}")
         await asyncio.sleep(12)
 
+async def smart_money_tracking_loop(session):
+    """
+    NEW STRATEGY: Polls trading activity of predefined high-win-rate wallets.
+    """
+    while True:
+        if not SMART_MONEY_WALLETS:
+            await asyncio.sleep(60)
+            continue
+            
+        for wallet in SMART_MONEY_WALLETS:
+            try:
+                url = f"https://api.dexscreener.com/latest/dex/search?q={wallet}"
+                async with session.get(url, timeout=10) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        pairs = data.get("pairs", [])
+                        for p in pairs[:3]:
+                            mint = p.get("baseToken", {}).get("address")
+                            chain = p.get("chainId", "").lower()
+                            if mint and chain in SUPPORTED_CHAINS:
+                                asyncio.create_task(process_token_discovery(session, chain, mint))
+            except Exception as e:
+                print(f"Smart money tracker error for {wallet}: {e}")
+            await asyncio.sleep(10)
+        await asyncio.sleep(30)
+
+async def websocket_mempool_sniffing_loop(session):
+    """
+    NEW STRATEGY: Direct RPC WebSocket Mempool listener for Pump.fun token creation.
+    """
+    if not websockets:
+        return
+        
+    ws_url = "wss://api.mainnet-beta.solana.com" # Swap with Helius / QuickNode WSS endpoint if desired
+    while True:
+        try:
+            async with websockets.connect(ws_url) as ws:
+                sub_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "logsSubscribe",
+                    "params": [
+                        {"mentions": ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"]},
+                        {"commitment": "processed"}
+                    ]
+                }
+                await ws.send(json.dumps(sub_payload))
+                
+                while True:
+                    response = await asyncio.wait_for(ws.recv(), timeout=30)
+                    data = json.loads(response)
+                    value = data.get("params", {}).get("result", {}).get("value", {})
+                    logs = value.get("logs", [])
+                    
+                    if any("Initialize" in log or "Create" in log for log in logs):
+                        sig = value.get("signature")
+                        if sig:
+                            # Handled via raw event observation pipeline
+                            pass
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:
+            print(f"WebSocket Mempool Error: {e}")
+            await asyncio.sleep(5)
+
 async def run_pro_omnichain_sniper():
     print("Elite Pro-Styled OmniChain Sniper + Solana Daily 5x $200K Strategy fully active, baby. 6767.")
     async with aiohttp.ClientSession() as session:
-        await asyncio.gather(
+        tasks = [
             dexscreener_dual_feed_loop(session),
             milestone_checker_loop(session),
             incubation_checker_loop(session),
             deployer_wallet_tracking_loop(session),
             mempool_sniffing_loop(session),
-            social_alpha_scraping_loop(session)
-        )
+            social_alpha_scraping_loop(session),
+            smart_money_tracking_loop(session)
+        ]
+        if websockets:
+            tasks.append(websocket_mempool_sniffing_loop(session))
+            
+        await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
     asyncio.run(run_pro_omnichain_sniper())

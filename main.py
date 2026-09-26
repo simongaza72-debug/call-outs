@@ -14,6 +14,7 @@ SUPPORTED_CHAINS = ["solana", "robinhood"]
 DEXSCREENER_LATEST_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_RECENT_PROFILES = "https://api.dexscreener.com/token-profiles/recent-updates/v1"
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
+DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 DEXSCREENER_BOOSTED_LATEST = "https://api.dexscreener.com/token-boosts/latest/v1"
 DEXSCREENER_BOOSTED_TOP = "https://api.dexscreener.com/token-boosts/top/v1"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/"
@@ -38,9 +39,7 @@ def load_persistence():
 
 def save_persistence(processed_set, tracked_dict, incubation_dict, solana_200k_tracked, daily_strategy):
     try:
-        # Atomic file write to prevent persistence corruption
         temp_file = f"{PERSISTENCE_FILE}.tmp"
-        # Keep processed set capped at 10,000 items to prevent RAM and disk bloat
         processed_list = list(processed_set)[-10000:]
         with open(temp_file, "w") as f:
             json.dump({
@@ -65,36 +64,131 @@ def check_and_reset_daily_quota():
         return True
     return daily_strategy_state.get("count", 0) < 5
 
-async def send_telegram_message(session, text, inline_keyboard=None):
+async def send_telegram_message(session, text, inline_keyboard=None, chat_id=None):
+    target_chat = chat_id or TELEGRAM_CHAT_ID
     try:
         payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
+            "chat_id": target_chat,
             "text": text,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
         }
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-        async with session.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=5) as response:
+        async with session.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=8) as response:
             pass
     except Exception as e:
         print(f"Telegram dispatch error: {e}")
 
-async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None):
+async def send_telegram_photo(session, photo_url, caption, inline_keyboard=None, chat_id=None):
+    target_chat = chat_id or TELEGRAM_CHAT_ID
     try:
         payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
+            "chat_id": target_chat,
             "photo": photo_url,
             "caption": caption,
             "parse_mode": "HTML"
         }
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-        async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=5) as response:
+        async with session.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=8) as response:
             if response.status != 200:
-                print(f"Photo send rejected by Telegram, falling back to text.")
-                await send_telegram_message(session, caption, inline_keyboard)
+                await send_telegram_message(session, caption, inline_keyboard, chat_id=target_chat)
     except Exception as e:
         print(f"Telegram photo error: {e}")
+
+async def answer_callback_query(session, callback_id, text="Processing request..."):
+    try:
+        payload = {"callback_query_id": callback_id, "text": text}
+        async with session.post(f"{TELEGRAM_API}/answerCallbackQuery", json=payload, timeout=5):
+            pass
+    except Exception as e:
+        print(f"Callback answer error: {e}")
+
+def get_main_menu_keyboard():
+    return [
+        [
+            {"text": "🔥 Top 5 Solana Memecoins", "callback_data": "top_solana"},
+            {"text": "🏹 Top 5 Robinhood Memecoins", "callback_data": "top_robinhood"}
+        ],
+        [
+            {"text": "📊 Bot Status & Stats", "callback_data": "bot_stats"},
+            {"text": "🔄 Refresh Menu", "callback_data": "show_menu"}
+        ]
+    ]
+
+async def send_main_menu(session, chat_id=None):
+    menu_text = (
+        "💎 <b>OMNICHAIN SNIPER COMMAND CENTER</b> 💎\n\n"
+        "<i>Select an action below to display live market analysis or bot telemetry:</i>"
+    )
+    await send_telegram_message(session, menu_text, get_main_menu_keyboard(), chat_id=chat_id)
+
+async def fetch_top_5_memecoins(session, chain_name):
+    query = "solana" if chain_name == "solana" else "robinhood"
+    url = f"{DEXSCREENER_SEARCH}{query}"
+    
+    try:
+        async with session.get(url, timeout=10) as res:
+            if res.status != 200:
+                return f"❌ <b>Error:</b> Unable to fetch {chain_name.upper()} market data at this time."
+            
+            data = await res.json()
+            pairs = data.get("pairs") or []
+            
+            filtered = []
+            seen = set()
+            
+            for p in pairs:
+                p_chain = str(p.get("chainId", "")).lower()
+                if chain_name == "robinhood":
+                    # Matches robinhood chain or EVM proxies associated with Robinhood ecosystem
+                    match_chain = p_chain in ["robinhood", "arbitrum", "ethereum", "base"]
+                else:
+                    match_chain = p_chain == chain_name
+                    
+                if match_chain:
+                    base_token = p.get("baseToken") or {}
+                    address = base_token.get("address")
+                    if address and address not in seen:
+                        seen.add(address)
+                        filtered.append(p)
+            
+            # Sort pairs by 24h Volume descending
+            filtered.sort(key=lambda x: float((x.get("volume") or {}).get("h24") or 0), reverse=True)
+            top_5 = filtered[:5]
+            
+            if not top_5:
+                return f"⚠️ <b>Notice:</b> No high-volume {chain_name.upper()} memecoins detected right now."
+            
+            header_icon = "🔥" if chain_name == "solana" else "🏹"
+            output = f"{header_icon} <b>TOP 5 {chain_name.upper()} MEMECOINS (BY 24H VOLUME)</b> {header_icon}\n\n"
+            
+            for idx, token in enumerate(top_5, 1):
+                base = token.get("baseToken") or {}
+                name = html.escape(str(base.get("name", "Unknown")))
+                symbol = html.escape(str(base.get("symbol", "???")))
+                mc = float(token.get("marketCap") or token.get("fdv") or 0)
+                vol = float((token.get("volume") or {}).get("h24") or 0)
+                price_change = float((token.get("priceChange") or {}).get("h24") or 0)
+                pair_url = token.get("url", "https://dexscreener.com")
+                
+                change_sign = "+" if price_change >= 0 else ""
+                
+                output += (
+                    f"<b>{idx}. {name} (${symbol})</b>\n"
+                    f"   📈 <b>Market Cap:</b> ${mc:,.0f}\n"
+                    f"   📊 <b>24h Volume:</b> ${vol:,.0f}\n"
+                    f"   ⚡ <b>24h Change:</b> {change_sign}{price_change:.2f}%\n"
+                    f"   🔗 <a href='{pair_url}'>View Chart on DexScreener</a>\n\n"
+                )
+                
+            output += "💎 <i>Live Intelligence Powered by OmniChain Engine 6767</i>"
+            return output
+            
+    except Exception as e:
+        print(f"Error fetching top memecoins for {chain_name}: {e}")
+        return f"❌ <b>Error:</b> Exception occurred while gathering {chain_name.upper()} data."
 
 async def advanced_intelligence_filter(session, chain_id, mint_address, pair_data, market_cap):
     try:
@@ -105,7 +199,8 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
         txns_h1 = txns_data.get("h1") or {}
         buys_h1 = int(txns_h1.get("buys") or 0)
         
-        if volume_h1 < 2000 or buys_h1 < 3:
+        # General activity floor filter
+        if volume_h1 < 1000 or buys_h1 < 2:
             return False
 
         if chain_id == "solana":
@@ -128,23 +223,31 @@ async def advanced_intelligence_filter(session, chain_id, mint_address, pair_dat
                     txns_h24 = txns_data.get("h24") or {}
                     if int(txns_h24.get("buys") or 0) >= 10:
                         return True
+                        
         elif chain_id == "robinhood":
             lp_info = pair_data.get("liquidity") or {}
-            if not lp_info or not isinstance(lp_info, dict):
-                return False
-            raw_usd = lp_info.get("usd", 0)
+            raw_usd = lp_info.get("usd", 0) if isinstance(lp_info, dict) else 0
             lp_usd = float(raw_usd) if raw_usd is not None else 0.0
-            if lp_usd < 15000:
+            
+            # Optimized liquidity floor for early Robinhood micro-caps
+            if lp_usd < 3000:
                 return False
+                
             txns_h24 = txns_data.get("h24") or {}
-            if (int(txns_h24.get("buys") or 0) + int(txns_h24.get("sells") or 0)) >= 30:
+            total_txns = int(txns_h24.get("buys") or 0) + int(txns_h24.get("sells") or 0)
+            
+            if total_txns >= 10:
                 return True
+
     except Exception as e:
         print(f"Advanced intelligence check error ({chain_id}): {e}")
         if chain_id == "solana":
             txns_h24 = (pair_data.get("txns") or {}).get("h24") or {}
             if int(txns_h24.get("buys") or 0) >= 10:
                 return True
+        elif chain_id == "robinhood":
+            return True
+            
     return False
 
 async def send_pro_channel_alert(session, token_data):
@@ -179,7 +282,7 @@ async def send_pro_channel_alert(session, token_data):
         keyboard.append(row2)
     
     image_url = token_data.get("image")
-    if image_url and image_url.startswith("http"):
+    if image_url and str(image_url).startswith("http"):
         await send_telegram_photo(session, image_url, caption, keyboard)
     else:
         await send_telegram_message(session, caption, keyboard)
@@ -194,7 +297,7 @@ async def send_solana_200k_strategy_alert(session, token_data):
         f"🔥 <i>Daily 5-Solana Strategy Slot Locked, baby. 6767</i>"
     )
     keyboard = [[{"text": "📈 Chart", "url": token_data["url"]}]]
-    if token_data.get("image") and token_data["image"].startswith("http"):
+    if token_data.get("image") and str(token_data["image"]).startswith("http"):
         await send_telegram_photo(session, token_data["image"], caption, keyboard)
     else:
         await send_telegram_message(session, caption, keyboard)
@@ -288,7 +391,7 @@ async def incubation_checker_loop(session):
                             current_mc = p.get("marketCap") or p.get("fdv") or 0
                             chain = data["chain"]
 
-                            if 50000 <= current_mc <= 150000:
+                            if 50000 <= current_mc <= 300000:
                                 base_token = p.get("baseToken") or {}
                                 token_name = base_token.get("name", "Unknown")
                                 token_symbol = base_token.get("symbol", "???")
@@ -346,7 +449,7 @@ async def incubation_checker_loop(session):
                                     "twitter": twitter_url
                                 })
                             
-                            elif current_mc > 150000:
+                            elif current_mc > 300000:
                                 async with processing_lock:
                                     if mint_address in incubation_tokens:
                                         del incubation_tokens[mint_address]
@@ -366,7 +469,6 @@ async def process_token_discovery(session, chain, raw_mint):
     
     mint_address = raw_mint.strip().lower()
 
-    # Early Mutex Guard: Prevents concurrent worker feeds from starting multi-step checks on the same token
     async with processing_lock:
         if (mint_address in tracked_tokens or 
             mint_address in incubation_tokens or 
@@ -387,12 +489,12 @@ async def process_token_discovery(session, chain, raw_mint):
             p = pairs[0]
             market_cap = p.get("marketCap") or p.get("fdv") or 0
             
-            if market_cap > 150000 and (chain != "solana" or market_cap >= 200000):
+            # Adjusted maximum ceiling for initial alert screening
+            if market_cap > 300000:
                 return
             
             passes_intel = await advanced_intelligence_filter(session, chain, mint_address, p, market_cap)
             if passes_intel:
-                # SOLANA $200K STRATEGY ENTRY (Solana only, MC below $200K, max 5/day)
                 if chain == "solana" and market_cap < 200000:
                     async with processing_lock:
                         if check_and_reset_daily_quota() and mint_address not in solana_200k_tracked:
@@ -422,7 +524,7 @@ async def process_token_discovery(session, chain, raw_mint):
                                 "url": url,
                                 "image": image_url
                             })
-                            return  # Prevents duplicate alert execution
+                            return
 
                 if market_cap < 50000:
                     async with processing_lock:
@@ -432,9 +534,6 @@ async def process_token_discovery(session, chain, raw_mint):
                     return
 
                 image_url = (p.get("info") or {}).get("imageUrl")
-                if not image_url:
-                    return
-                    
                 base_token = p.get("baseToken") or {}
                 token_name = base_token.get("name", "Unknown")
                 token_symbol = base_token.get("symbol", "???")
@@ -565,16 +664,85 @@ async def social_alpha_scraping_loop(session):
             print(f"Social alpha scraper error: {e}")
         await asyncio.sleep(12)
 
+async def telegram_polling_loop(session):
+    """Listens for user commands (/start, /menu, /top) and menu button clicks."""
+    offset = 0
+    print("[+] Interactive Telegram Menu Listener Started.")
+    
+    while True:
+        try:
+            url = f"{TELEGRAM_API}/getUpdates?offset={offset}&timeout=10"
+            async with session.get(url, timeout=15) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    for update in data.get("result", []):
+                        offset = update["update_id"] + 1
+                        
+                        # Handle Direct Message Commands
+                        if "message" in update and "text" in update["message"]:
+                            msg = update["message"]
+                            text = msg["text"].strip().lower()
+                            chat_id = msg["chat"]["id"]
+                            
+                            if text in ["/start", "/menu", "menu"]:
+                                await send_main_menu(session, chat_id=chat_id)
+                            elif text in ["/top", "top"]:
+                                sol_report = await fetch_top_5_memecoins(session, "solana")
+                                await send_telegram_message(session, sol_report, get_main_menu_keyboard(), chat_id=chat_id)
+                                rh_report = await fetch_top_5_memecoins(session, "robinhood")
+                                await send_telegram_message(session, rh_report, get_main_menu_keyboard(), chat_id=chat_id)
+
+                        # Handle Inline Menu Button Clicks
+                        elif "callback_query" in update:
+                            cb = update["callback_query"]
+                            cb_id = cb["id"]
+                            cb_data = cb.get("data")
+                            chat_id = cb["message"]["chat"]["id"]
+                            
+                            await answer_callback_query(session, cb_id)
+                            
+                            if cb_data == "show_menu":
+                                await send_main_menu(session, chat_id=chat_id)
+                                
+                            elif cb_data == "top_solana":
+                                report = await fetch_top_5_memecoins(session, "solana")
+                                await send_telegram_message(session, report, get_main_menu_keyboard(), chat_id=chat_id)
+                                
+                            elif cb_data == "top_robinhood":
+                                report = await fetch_top_5_memecoins(session, "robinhood")
+                                await send_telegram_message(session, report, get_main_menu_keyboard(), chat_id=chat_id)
+                                
+                            elif cb_data == "bot_stats":
+                                stats_msg = (
+                                    f"📊 <b>OMNICHAIN SNIPER ENGINE TELEMETRY</b> 📊\n\n"
+                                    f"🟢 <b>Tracked Runners:</b> {len(tracked_tokens)}\n"
+                                    f"🐣 <b>Incubation Watchlist:</b> {len(incubation_tokens)}\n"
+                                    f"🎯 <b>Solana 200K Entries:</b> {len(solana_200k_tracked)}\n"
+                                    f"📅 <b>Daily Strategy Quota:</b> {daily_strategy_state.get('count', 0)}/5 used today\n"
+                                    f"⚙️ <b>Processed History:</b> {len(processed_txs)} tokens indexed\n\n"
+                                    f"🛡️ <i>Engine operational and filtering 24/7. 6767</i>"
+                                )
+                                await send_telegram_message(session, stats_msg, get_main_menu_keyboard(), chat_id=chat_id)
+
+        except Exception as e:
+            print(f"Telegram polling loop error: {e}")
+            
+        await asyncio.sleep(1)
+
 async def run_pro_omnichain_sniper():
-    print("Elite Pro-Styled OmniChain Sniper + Solana Daily 5x $200K Strategy fully active, baby. 6767.")
+    print("Elite Pro-Styled OmniChain Sniper + Interactive Menu fully active, baby. 6767.")
     async with aiohttp.ClientSession() as session:
+        # Initial greeting and command menu initialization
+        await send_main_menu(session)
+        
         await asyncio.gather(
             dexscreener_dual_feed_loop(session),
             milestone_checker_loop(session),
             incubation_checker_loop(session),
             deployer_wallet_tracking_loop(session),
             mempool_sniffing_loop(session),
-            social_alpha_scraping_loop(session)
+            social_alpha_scraping_loop(session),
+            telegram_polling_loop(session)
         )
 
 if __name__ == "__main__":
